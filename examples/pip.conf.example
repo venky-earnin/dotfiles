@@ -1,0 +1,8 @@
+[global]
+break-system-packages = false
+user = false
+
+# If your company requires a private index, configure it locally with a
+# credential helper or environment variable. Do not commit tokenized URLs.
+# extra-index-url = https://<host>/api/pypi/simple
+# trusted-host = <host>

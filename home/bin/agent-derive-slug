@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# agent-derive-slug — convert a free-form task description into a "type/slug"
+# git branch name, using Claude Haiku in non-interactive mode.
+#
+# Usage:
+#   agent-derive-slug <description...>
+#
+# Prints "type/slug" on stdout on success. Exits non-zero with an explanatory
+# message on stderr if the model is unavailable or returns something invalid.
+#
+# Allowed types: feat, fix, test, refactor, docs, chore, ci, perf, exp
+# Slug shape:    ^[a-z0-9][a-z0-9.-]*$  (kebab-case, ~50 chars max)
+#
+# Designed to be called by agent-task in ~/.zshrc when the user passes a
+# sentence instead of a slug (e.g. cl "add more decoder metrics and cleanup
+# spammy mlflow logs"). See AGENTS.md "Git hygiene" for the branch-name
+# conventions this helper enforces.
+
+set -euo pipefail
+
+if [[ $# -lt 1 ]]; then
+  echo "usage: agent-derive-slug <description...>" >&2
+  exit 2
+fi
+
+description="$*"
+
+if ! command -v claude >/dev/null 2>&1; then
+  echo "agent-derive-slug: claude CLI not found on PATH" >&2
+  exit 1
+fi
+
+prompt="Convert this task description into a single git branch name.
+
+Description: ${description}
+
+Output strictly ONE line in this exact shape:
+  TYPE/SLUG
+
+Rules:
+- TYPE must be one of: feat, fix, test, refactor, docs, chore, ci, perf, exp
+- Pick the dominant intent if mixed (e.g. 'add X and cleanup Y' -> feat;
+  'remove Z and rename W' -> chore; 'fix bug and add test' -> fix).
+- SLUG must be kebab-case: lowercase letters, digits, and hyphens only.
+- SLUG must be concise: aim 3-6 words, ~50 chars max total (TYPE+SLUG).
+- No quotes, no backticks, no period, no explanation, no leading verbs
+  like 'add' or 'fix' (the TYPE already conveys intent).
+
+Output ONLY the TYPE/SLUG line. Nothing else."
+
+# --tools "" disables all tool loading for a faster, cheaper call.
+# --output-format text returns just the model's text response.
+raw="$(claude -p \
+  --model claude-haiku-4-5 \
+  --tools "" \
+  --output-format text \
+  "$prompt" 2>/dev/null)" || {
+  echo "agent-derive-slug: claude -p invocation failed" >&2
+  exit 1
+}
+
+# Take the first non-empty line and strip surrounding whitespace.
+candidate="$(printf '%s\n' "$raw" |
+  awk 'NF { print; exit }' |
+  tr -d '[:space:]')"
+
+if [[ -z "$candidate" ]]; then
+  echo "agent-derive-slug: empty response from claude" >&2
+  exit 1
+fi
+
+if [[ "$candidate" != */* ]]; then
+  echo "agent-derive-slug: bad shape from model (expected type/slug, got '$candidate')" >&2
+  exit 1
+fi
+
+t="${candidate%%/*}"
+s="${candidate#*/}"
+
+case "$t" in
+  feat | fix | test | refactor | docs | chore | ci | perf | exp) ;;
+  *)
+    echo "agent-derive-slug: unknown type '$t' in candidate '$candidate'" >&2
+    exit 1
+    ;;
+esac
+
+# Slug regex matches agent-worktree's own validation.
+if ! [[ "$s" =~ ^[a-z0-9][a-z0-9.-]*$ ]]; then
+  echo "agent-derive-slug: invalid slug '$s' in candidate '$candidate'" >&2
+  exit 1
+fi
+
+printf '%s/%s\n' "$t" "$s"

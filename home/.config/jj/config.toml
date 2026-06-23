@@ -1,0 +1,27 @@
+# jj (jujutsu) global config.
+#
+# jj is installed primarily as a multi-agent safety net. Daily flow stays on
+# `git`. For each repo where you want jj recovery, run once:
+#     jj git init --colocate
+# That makes jj and git share the same .git/ — both tools work on the same
+# checkout. When an agent does something destructive (rebase gone wrong,
+# branch deleted, merge in the wrong place), recover with:
+#     jj op log              # see every operation, including merges/rebases
+#     jj op restore <op-id>  # undo to a prior state, atomically
+#
+# See https://jj-vcs.github.io/jj/latest/tutorial/ for the full guide.
+
+[user]
+name = "Your Name"
+email = "you@example.com"
+
+[ui]
+# Use the same editor zsh uses for git commits.
+editor = ":builtin"
+# Show diffs with the same tool git is set to use (delta via gitconfig).
+default-command = "log"
+
+[snapshot]
+# Auto-snapshot working copy changes on every command (jj default; explicit
+# for clarity in a multi-agent context — every keystroke is recoverable).
+auto-track = "all()"

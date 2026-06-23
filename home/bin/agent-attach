@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# agent-attach — launch a CLI inside an EXISTING worktree, no creation.
+#
+# Unlike `agent-worktree` (which creates) or `agent-task` (create-or-reattach),
+# this is a pure attach: it resolves a worktree by name/substring or via an
+# interactive picker, then opens (or reattaches) a tmux session in it with
+# the chosen CLI.
+#
+# Usage:
+#   agent-attach [--cli codex|claude|other] [<query>]
+#
+# Behavior:
+#   no <query>       → interactive picker (fzf if available, else `select`)
+#   <query> matches  → direct attach (exact basename > substring match)
+#   <query> no match → error (suggests `cl`/`cx` to create instead)
+
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+usage: agent-attach [--cli codex|claude|other] [<query>]
+
+Resolves an existing worktree of the current repo and launches the chosen
+CLI inside it (in a tmux session named <prefix>-<repo>-<wt-basename>).
+
+  no <query>      open an interactive picker over all worktrees
+  <query>         match by exact basename, then substring; slashes auto-
+                  converted (feat/foo → feat-foo)
+
+This NEVER creates a worktree. Use `cl <slug>` / `cx <slug>` for that.
+EOF
+}
+
+cli="claude"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --cli)
+      cli="$2"
+      shift 2
+      ;;
+    --cli=*)
+      cli="${1#--cli=}"
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "unknown option: $1" >&2
+      usage
+      exit 2
+      ;;
+    *) break ;;
+  esac
+done
+
+case "$cli" in
+  codex | claude | other) ;;
+  *)
+    echo "--cli must be one of: codex, claude, other" >&2
+    exit 2
+    ;;
+esac
+
+query="${1:-}"
+# Normalize slashes (feat/foo → feat-foo) so users can paste branch-style slugs.
+query="${query//\//-}"
+
+# Resolve main repo root (walks up from cwd, then picks the first entry from
+# `git worktree list --porcelain` which is always the main checkout).
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+  echo "agent-attach: not in a git repo" >&2
+  exit 2
+}
+repo_root="$(git -C "$repo_root" worktree list --porcelain |
+  awk '/^worktree / {print $2; exit}')"
+repo_name="$(basename "$repo_root")"
+
+# Build a tab-separated table of NON-main worktrees:
+#   <basename>\t<path>\t<branch>\t<dirty>\t<commit>
+lines="$(git -C "$repo_root" worktree list --porcelain | python3 -c '
+import sys, subprocess, os
+rows, cur = [], {}
+for line in sys.stdin:
+    line = line.rstrip()
+    if not line:
+        if cur: rows.append(cur); cur = {}
+        continue
+    if line.startswith("worktree "):     cur["path"]   = line[9:]
+    elif line.startswith("HEAD "):       cur["head"]   = line[5:]
+    elif line.startswith("branch refs/heads/"): cur["branch"] = line[len("branch refs/heads/"):]
+    elif line == "detached":             cur["branch"] = "(detached)"
+if cur: rows.append(cur)
+main_root = rows[0]["path"] if rows else ""
+for r in rows:
+    if r["path"] == main_root: continue
+    bn = os.path.basename(r["path"])
+    branch = r.get("branch", "?")
+    dirty = "dirty" if subprocess.run(
+        ["git", "-C", r["path"], "status", "--porcelain"],
+        capture_output=True).stdout.strip() else "clean"
+    try:
+        commit = subprocess.run(
+            ["git", "-C", r["path"], "log", "-1", "--format=%h %s"],
+            capture_output=True, text=True).stdout.strip()[:60]
+    except Exception:
+        commit = ""
+    print("\t".join([bn, r["path"], branch, dirty, commit]))
+')"
+
+if [[ -z "$lines" ]]; then
+  echo "agent-attach: no worktrees for $repo_name" >&2
+  echo "hint: create one with \`cl <type/slug>\` or \`cx <type/slug>\`" >&2
+  exit 1
+fi
+
+# Try direct match against the query.
+chosen=""
+if [[ -n "$query" ]]; then
+  chosen="$(awk -F'\t' -v q="$query" '$1==q {print; exit}' <<<"$lines")"
+  if [[ -z "$chosen" ]]; then
+    # grep returns 1 on no-match; with pipefail that would kill the script
+    # before the friendly error below — swallow with `|| true`.
+    chosen="$(grep -F -- "$query" <<<"$lines" | head -1 || true)"
+  fi
+  if [[ -z "$chosen" ]]; then
+    echo "agent-attach: no worktree matches '$query'" >&2
+    echo "hint: try with no args for a picker, or create with \`cl $query\`" >&2
+    exit 1
+  fi
+fi
+
+# Interactive selection if no query or no match.
+if [[ -z "$chosen" ]]; then
+  if command -v fzf >/dev/null 2>&1; then
+    pretty="$(column -t -s $'\t' <<<"$lines")"
+    picked="$(fzf --ansi --no-multi \
+      --header="select worktree to attach with $cli (Esc to cancel)" \
+      --preview-window=hidden <<<"$pretty" || true)"
+    [[ -z "$picked" ]] && {
+      echo "agent-attach: cancelled" >&2
+      exit 130
+    }
+    # Recover the basename (first whitespace-separated token).
+    bn_picked="${picked%%[[:space:]]*}"
+    chosen="$(awk -F'\t' -v b="$bn_picked" '$1==b {print; exit}' <<<"$lines")"
+  else
+    echo "Worktrees for $repo_name:" >&2
+    i=1
+    declare -a entries=()
+    while IFS= read -r row; do
+      entries+=("$row")
+      printf '  %d) %s  [%s, %s]\n' "$i" \
+        "$(awk -F'\t' '{print $1}' <<<"$row")" \
+        "$(awk -F'\t' '{print $3}' <<<"$row")" \
+        "$(awk -F'\t' '{print $4}' <<<"$row")" >&2
+      i=$((i + 1))
+    done <<<"$lines"
+    printf 'pick #: ' >&2
+    read -r idx
+    chosen="${entries[$((idx - 1))]:-}"
+  fi
+fi
+
+[[ -z "$chosen" ]] && {
+  echo "agent-attach: no selection" >&2
+  exit 1
+}
+
+IFS=$'\t' read -r bn path branch dirty _commit <<<"$chosen"
+[[ -d "$path" ]] || {
+  echo "agent-attach: $path no longer exists" >&2
+  exit 1
+}
+
+case "$cli" in
+  claude) prefix=cl ;;
+  codex) prefix=cx ;;
+  *) prefix="$cli" ;;
+esac
+session="${prefix}-${repo_name}-${bn}"
+
+echo "agent-attach: $cli → $path" >&2
+echo "  branch: $branch  ($dirty)" >&2
+echo "  tmux:   $session" >&2
+
+if tmux has-session -t "$session" 2>/dev/null; then
+  exec tmux attach -t "$session"
+fi
+
+case "$cli" in
+  claude) exec tmux new-session -s "$session" -c "$path" "claude --dangerously-skip-permissions" ;;
+  codex) exec tmux new-session -s "$session" -c "$path" "codex --sandbox danger-full-access" ;;
+  *) exec tmux new-session -s "$session" -c "$path" "$SHELL" ;;
+esac

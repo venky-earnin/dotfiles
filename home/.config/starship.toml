@@ -1,0 +1,39 @@
+add_newline = false
+command_timeout = 1000
+
+format = "$directory$git_branch$git_status$cmd_duration $character"
+
+[directory]
+style = "cyan"
+truncation_length = 3
+truncate_to_repo = true
+format = "[$path]($style)"
+
+[git_branch]
+style = "purple"
+symbol = ""
+format = "[ $branch]($style)"
+
+[git_status]
+style = "red"
+format = "[$all_status$ahead_behind]($style)"
+conflicted = "!"
+ahead = "^${count}"
+behind = "v${count}"
+diverged = "^${ahead_count}v${behind_count}"
+up_to_date = ""
+untracked = "?"
+stashed = ""
+modified = "*"
+staged = "+"
+renamed = "R"
+deleted = "x"
+
+[cmd_duration]
+min_time = 3000
+format = "[$duration]($style) "
+style = "dimmed yellow"
+
+[character]
+success_symbol = "[>](bold green)"
+error_symbol = "[>](bold red)"

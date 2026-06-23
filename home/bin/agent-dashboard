@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# agent-dashboard — open a tmux session with cross-agent visibility:
+#   top-left:  agent-worktrees --status (refreshes every 15s)
+#   top-right: live `tail -F` of all per-repo INBOX.md under ~/.config/agents/inbox
+#   bottom:    tmux list-sessions (refreshes every 5s)
+#
+# Run from anywhere. Optional first arg: a single repo path to focus the
+# INBOX tail and worktree status on. Default: scan ~/Coding.
+
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+usage: agent-dashboard [scan-root]
+
+Opens (or attaches to) a tmux session named `agents-dashboard` with three
+live panes:
+  - top-left:  agent-worktrees --status (refreshes every 15s)
+  - top-right: tail -F of all per-repo INBOX.md under ~/.config/agents/inbox
+  - bottom:    tmux list-sessions (refreshes every 5s)
+
+scan-root defaults to ~/Coding.
+EOF
+}
+
+case "${1:-}" in
+  -h | --help)
+    usage
+    exit 0
+    ;;
+esac
+
+SESSION="agents-dashboard"
+SCAN_ROOT="${1:-$HOME/Coding}"
+
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  if [[ -n "${TMUX:-}" ]]; then
+    tmux switch-client -t "$SESSION"
+  else
+    tmux attach -t "$SESSION"
+  fi
+  exit 0
+fi
+
+if [[ -d "$SCAN_ROOT/.git" ]]; then
+  worktrees_cmd="cd '$SCAN_ROOT' && while true; do clear; date -u; echo; agent-worktrees --status; sleep 15; done"
+else
+  worktrees_cmd="while true; do clear; date -u; echo '(workspaces under $SCAN_ROOT)'; for d in $SCAN_ROOT/*/*/; do [[ -d \"\$d/.git\" ]] || continue; printf '\\n=== %s ===\\n' \"\$(basename \$d)\"; (cd \"\$d\" && agent-worktrees --status 2>/dev/null | head -6); done; sleep 15; done"
+fi
+
+# Collect candidate INBOX.md paths from the shared per-repo store.
+# (agent-inbox now writes to ~/.config/agents/inbox/<main-repo-name>/INBOX.md,
+# shared across the base repo and all its worktrees.)
+inbox_root="$HOME/.config/agents/inbox"
+inbox_glob="$(find "$inbox_root" -maxdepth 2 -type f -name INBOX.md 2>/dev/null | tr '\n' ' ')"
+if [[ -z "$inbox_glob" ]]; then
+  inbox_cmd="echo '(no INBOX.md files yet under $inbox_root)'; while true; do sleep 30; done"
+else
+  inbox_cmd="tail -F $inbox_glob"
+fi
+
+sessions_cmd='while true; do clear; date -u; echo; tmux list-sessions -F "#{session_name}  (#{session_attached} attached) #{?session_grouped,grouped,}" 2>/dev/null; echo; echo "=== agents-dashboard windows ==="; tmux list-windows -t '"$SESSION"' 2>/dev/null; sleep 5; done'
+
+tmux new-session -d -s "$SESSION" -n status -x 220 -y 50 "$worktrees_cmd"
+tmux split-window -h -t "$SESSION:status" "$inbox_cmd"
+tmux split-window -v -t "$SESSION:status.0" "$sessions_cmd"
+tmux select-layout -t "$SESSION:status" main-vertical
+tmux setw -t "$SESSION:status" main-pane-width 130
+
+if [[ -n "${TMUX:-}" ]]; then
+  tmux switch-client -t "$SESSION"
+else
+  tmux attach -t "$SESSION"
+fi

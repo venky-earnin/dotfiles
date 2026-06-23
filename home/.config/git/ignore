@@ -1,0 +1,12 @@
+**/.claude/settings.local.json
+.DS_Store
+.AppleDouble
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+.env.local
+.env.*.local
+.direnv/
+.venv/
+node_modules/

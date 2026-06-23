@@ -1,0 +1,17 @@
+# Copy to ~/.config/zsh/private.zsh and chmod 600.
+# Keep secrets, credentials, company-only exports, and machine-local paths here.
+
+# Example: add local tool paths.
+# path=("$HOME/.local/private-bin" $path)
+
+# Example: configure a work profile without committing it.
+# export AWS_PROFILE="work"
+# export AWS_REGION="us-west-2"
+
+# Example: enterprise certificate bundle.
+# export REQUESTS_CA_BUNDLE="$HOME/.certs/company-ca.pem"
+# export SSL_CERT_FILE="$REQUESTS_CA_BUNDLE"
+# export NODE_EXTRA_CA_CERTS="$REQUESTS_CA_BUNDLE"
+
+# Example: auth helper functions from an internal tool.
+# [[ -r "$HOME/.internal-auth/functions" ]] && source "$HOME/.internal-auth/functions"

@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# agent-learn — append a new entry to ~/.config/agents/LEARNINGS.md using the
+# canonical terse format. Opens $EDITOR with a template; on save, appends.
+#
+# Usage:
+#   agent-learn                              # opens template in $EDITOR
+#   agent-learn -t "short title"             # pre-fills title
+#   agent-learn -t "title" --tags "a,b" --errors "ERR_NAME" --scope global
+#                                            # all fields pre-filled; if -m
+#                                            # also provided, writes
+#                                            # non-interactively.
+#   agent-learn ... -m "body bullet 1\nbody bullet 2"
+#                                            # non-interactive write
+
+set -euo pipefail
+
+LEARNINGS="${LEARNINGS:-$HOME/.config/agents/LEARNINGS.md}"
+EDITOR_CMD="${VISUAL:-${EDITOR:-vim}}"
+
+usage() {
+  cat >&2 <<'EOF'
+usage: agent-learn                                     # open template in $EDITOR
+       agent-learn -t "short title"                    # pre-fill title
+       agent-learn -t "title" --tags "a,b" --errors "ERR_NAME" --scope global
+                                                       # pre-fill all fields
+       agent-learn ... -m "body line 1\nbody line 2"
+                                                       # non-interactive write
+Body should be 4 lines:
+  - Tried: <what failed or wasted time>
+  - Fix: <the working pattern>
+  - Verify: <how to confirm>
+  - Promote-to: AGENTS.md | repo AGENTS.md | skill:<name> | none
+EOF
+}
+
+title=""
+tags=""
+errors=""
+scope="global"
+body=""
+non_interactive=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -t | --title)
+      title="$2"
+      shift 2
+      ;;
+    --tags)
+      tags="$2"
+      shift 2
+      ;;
+    --errors)
+      errors="$2"
+      shift 2
+      ;;
+    --scope)
+      scope="$2"
+      shift 2
+      ;;
+    -m | --body)
+      body="$2"
+      non_interactive=true
+      shift 2
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown option: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+date_str="$(date -u +%Y-%m-%d)"
+title="${title:-<short title>}"
+
+tmpl="$(mktemp -t agent-learn.XXXXXX.md)"
+trap 'rm -f "$tmpl"' EXIT
+
+cat >"$tmpl" <<EOF
+### ${date_str} — ${title}
+tags: ${tags}
+errors: ${errors}
+scope: ${scope}
+stale-since: never
+
+EOF
+
+if "$non_interactive"; then
+  printf '%b\n' "$body" >>"$tmpl"
+else
+  cat >>"$tmpl" <<'EOF'
+- Tried: <what failed or wasted time, one line>
+- Fix: <the actual working pattern, one line>
+- Verify: <how to confirm the fix worked>
+- Promote-to: <AGENTS.md | repo AGENTS.md | skill | none>
+
+(delete this hint paragraph and everything below before saving.)
+EOF
+  "$EDITOR_CMD" "$tmpl"
+fi
+
+# Strip the trailing hint block (parenthetical and below).
+cleaned="$(sed '/^(delete this hint paragraph/,$d' "$tmpl")"
+
+if [[ -z "$(printf '%s' "$cleaned" | tr -d ' \t\n')" ]]; then
+  echo "empty entry, not appending" >&2
+  exit 1
+fi
+
+# Append with a leading blank line for readability.
+{
+  echo
+  printf '%s\n' "$cleaned"
+} >>"$LEARNINGS"
+
+echo "appended to $LEARNINGS:"
+echo
+printf '%s\n' "$cleaned" | head -8

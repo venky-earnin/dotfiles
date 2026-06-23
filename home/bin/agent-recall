@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# agent-recall — search ~/.config/agents/LEARNINGS.md for prior lessons that
+# might apply to the current problem. Prints matching entries with their date
+# so staleness is visible. Treat hits as DIRECTION TO TRY, not authoritative.
+#
+# Usage:
+#   agent-recall <keyword>             # case-insensitive substring search
+#   agent-recall -e <error-snippet>    # search the "errors:" header lines only
+#   agent-recall -t <tag>              # search the "tags:" header lines only
+#   agent-recall --list                # list all entry titles + dates
+#   agent-recall --since YYYY-MM-DD    # only entries on/after that date
+#   agent-recall --limit N             # cap matches (default 10)
+#
+# Output is grouped by entry (### header). Designed to be cheap to read by
+# an agent: ~10 lines per entry, no full-file load.
+
+set -euo pipefail
+
+LEARNINGS="${LEARNINGS:-$HOME/.config/agents/LEARNINGS.md}"
+
+if [[ ! -f "$LEARNINGS" ]]; then
+  echo "no learnings file at $LEARNINGS" >&2
+  exit 1
+fi
+
+usage() {
+  cat >&2 <<'EOF'
+usage: agent-recall <keyword>              # case-insensitive content search
+       agent-recall -e <error-snippet>     # search the "errors:" header lines
+       agent-recall -t <tag>               # search the "tags:" header lines
+       agent-recall --list                 # list all entry titles + dates
+       agent-recall --since YYYY-MM-DD     # only entries on/after that date
+       agent-recall --limit N              # cap matches (default 10)
+
+Treat hits as DIRECTION TO TRY, not authoritative. Verify and note the date.
+EOF
+}
+
+mode="content"
+since=""
+limit=10
+query=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -e | --error)
+      mode="errors"
+      query="$2"
+      shift 2
+      ;;
+    -t | --tag)
+      mode="tags"
+      query="$2"
+      shift 2
+      ;;
+    --since)
+      since="$2"
+      shift 2
+      ;;
+    --limit)
+      limit="$2"
+      shift 2
+      ;;
+    --list)
+      mode="list"
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    -*)
+      echo "unknown option: $1" >&2
+      exit 2
+      ;;
+    *)
+      query="${query:-$1}"
+      shift
+      ;;
+  esac
+done
+
+if [[ "$mode" != "list" && -z "$query" ]]; then
+  echo "usage: agent-recall <keyword> | -e <error> | -t <tag> | --list" >&2
+  exit 2
+fi
+
+awk -v mode="$mode" -v q="$query" -v since="$since" -v limit="$limit" '
+  function emit_if_match() {
+    if (n == 0) return
+    body = ""
+    for (i = 0; i < n; i++) body = body lines[i] "\n"
+    matched = 0
+    if (mode == "list") {
+      matched = 1
+    } else if (mode == "errors") {
+      if (errors_line != "" && tolower(errors_line) ~ tolower(q)) matched = 1
+    } else if (mode == "tags") {
+      if (tags_line != "" && tolower(tags_line) ~ tolower(q)) matched = 1
+    } else {
+      if (tolower(body) ~ tolower(q)) matched = 1
+    }
+    if (matched && (since == "" || date >= since)) {
+      if (mode != "list" && matches >= limit) { truncated = 1; return }
+      matches++
+      if (mode == "list") {
+        printf("%s  %s\n", date, title)
+      } else {
+        print body
+      }
+    }
+  }
+  # Only start parsing entries after the first standalone `---` line (the
+  # separator between docs and entries). Before that, ignore any `###` headings
+  # so the format template inside the docs is not matched.
+  /^---$/ { entries_started = 1; next }
+  !entries_started { next }
+
+  /^### / {
+    emit_if_match()
+    title = $0
+    sub(/^### /, "", title)
+    # Try to extract YYYY-MM-DD from the title.
+    date = ""
+    if (match(title, /[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)) {
+      date = substr(title, RSTART, RLENGTH)
+    }
+    n = 0
+    tags_line = ""
+    errors_line = ""
+    lines[n++] = $0
+    next
+  }
+  {
+    if (n > 0) {
+      lines[n++] = $0
+      lower = tolower($0)
+      if (lower ~ /^[[:space:]]*tags[[:space:]]*:/)   tags_line = $0
+      if (lower ~ /^[[:space:]]*errors[[:space:]]*:/) errors_line = $0
+    }
+  }
+  END {
+    emit_if_match()
+    if (matches == 0) {
+      print "no matches" > "/dev/stderr"
+      exit 1
+    }
+    if (truncated) {
+      printf("(truncated to %d matches; use --limit N to expand)\n", limit) > "/dev/stderr"
+    }
+  }
+' "$LEARNINGS"

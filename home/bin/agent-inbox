@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# agent-inbox — append a line to the shared per-repo INBOX, or tail the last
+# N lines for cross-agent visibility.
+#
+# The INBOX is shared across the base repo and all its worktrees, so any
+# session (no matter which checkout it was started in) sees the full activity
+# log. Path:
+#
+#   ~/.config/agents/inbox/<main-repo-name>/INBOX.md
+#
+# The main-repo name is derived via `git rev-parse --git-common-dir`, which
+# returns the same .git path from any worktree of the same repo.
+#
+# Usage:
+#   agent-inbox <message...>         # append a status line
+#   agent-inbox --tail [N]           # show last N lines (default 20)
+#   agent-inbox --tail-follow        # follow live (tail -f)
+#   agent-inbox --clear              # wipe the inbox (with confirmation)
+#   agent-inbox --path               # print the resolved INBOX path
+#
+# Format of each appended line:
+#   [YYYY-MM-DDTHH:MM:SSZ <session> <branch> wt:<wt-basename>] <message>
+
+set -euo pipefail
+
+mode="append"
+n="20"
+
+usage() {
+  cat >&2 <<'EOF'
+usage: agent-inbox <message...>            # append a status line
+       agent-inbox --tail [N]              # show last N lines (default 20)
+       agent-inbox --tail-follow           # follow live (tail -f)
+       agent-inbox --clear                 # wipe the inbox (confirms first)
+       agent-inbox --path                  # print resolved INBOX path
+
+Each appended line:
+  [YYYY-MM-DDTHH:MM:SSZ <session> <branch> wt:<wt-basename>] <message>
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tail)
+      mode="tail"
+      shift
+      if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+        n="$1"
+        shift
+      fi
+      ;;
+    --tail-follow)
+      mode="follow"
+      shift
+      ;;
+    --clear)
+      mode="clear"
+      shift
+      ;;
+    --path)
+      mode="path"
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *) break ;;
+  esac
+done
+
+# Resolve the main repo identity from any worktree.
+git_common_dir="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+if [[ -z "$git_common_dir" ]]; then
+  echo "agent-inbox: not inside a git repo" >&2
+  exit 2
+fi
+if [[ "$git_common_dir" != /* ]]; then
+  git_common_dir="$(pwd)/$git_common_dir"
+fi
+main_repo_root="$(cd "$(dirname "$git_common_dir")" && pwd)"
+main_repo_name="$(basename "$main_repo_root")"
+
+inbox_dir="${HOME}/.config/agents/inbox/${main_repo_name}"
+inbox="${inbox_dir}/INBOX.md"
+mkdir -p "$inbox_dir"
+
+case "$mode" in
+  path)
+    echo "$inbox"
+    ;;
+  tail)
+    if [[ -f "$inbox" ]]; then
+      tail -n "$n" "$inbox"
+    else
+      echo "(empty inbox at $inbox)"
+    fi
+    ;;
+  follow)
+    [[ -f "$inbox" ]] || touch "$inbox"
+    tail -f "$inbox"
+    ;;
+  clear)
+    if [[ -t 0 && -t 1 ]]; then
+      printf "wipe %s? [y/N] " "$inbox" >&2
+      read -r ans
+      [[ "$ans" =~ ^[Yy]$ ]] || {
+        echo "aborted" >&2
+        exit 1
+      }
+    fi
+    : >"$inbox"
+    echo "cleared $inbox"
+    ;;
+  append)
+    [[ $# -ge 1 ]] || {
+      echo "usage: agent-inbox <message...>" >&2
+      exit 2
+    }
+    msg="$*"
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    session="${TMUX_PANE:+$(tmux display-message -p '#S' 2>/dev/null)}"
+    session="${session:-${TMUX:+tmux-other}}"
+    session="${session:-shell-$$}"
+    cwd_toplevel="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    wt_basename="$(basename "$cwd_toplevel")"
+    branch="$(git -C "$cwd_toplevel" branch --show-current 2>/dev/null || echo '-')"
+    [[ -z "$branch" ]] && branch="(detached)"
+    printf '[%s %s %s wt:%s] %s\n' "$ts" "$session" "$branch" "$wt_basename" "$msg" >>"$inbox"
+    ;;
+esac

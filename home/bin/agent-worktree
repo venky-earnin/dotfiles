@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# agent-worktree — create a git worktree + branch for one task, with traceable
+# metadata in .agent-session.json. Agent-agnostic (Codex, Claude, etc.).
+#
+# Replaces the older codex-worktree helper. The old path
+# (~/.codex/bin/codex-worktree) is kept as a symlink for back-compat.
+
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+usage: agent-worktree [--dry-run] [--cli codex|claude|other] <type/task-slug|task-slug> [base-ref]
+
+example: agent-worktree feat/hyperpod-submit main
+example: agent-worktree --cli claude dataloader-stall-fix HEAD
+
+Branches default to type/slug; a short id is added only on collision.
+Branch types: feat, fix, test, refactor, docs, chore, ci, perf, exp.
+
+Metadata is written to .agent-session.json in the new worktree.
+For back-compat, .codex-session.json is also written (same content) when
+--cli is codex or omitted (env AGENT_CLI=codex still wins).
+EOF
+}
+
+dry_run=false
+cli="${AGENT_CLI:-codex}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run | -n)
+      dry_run=true
+      shift
+      ;;
+    --cli)
+      cli="$2"
+      shift 2
+      ;;
+    --cli=*)
+      cli="${1#--cli=}"
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "unknown option: $1" >&2
+      usage
+      exit 2
+      ;;
+    *) break ;;
+  esac
+done
+
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  usage
+  exit 2
+fi
+
+case "$cli" in
+  codex | claude | other) ;;
+  *)
+    echo "--cli must be one of: codex, claude, other" >&2
+    exit 2
+    ;;
+esac
+
+task_input="$1"
+base_ref="${2:-HEAD}"
+normalized_task="$(printf '%s' "$task_input" | tr '[:upper:]' '[:lower:]')"
+
+if [[ "$normalized_task" == */* ]]; then
+  branch_type="${normalized_task%%/*}"
+  branch_slug="${normalized_task#*/}"
+else
+  branch_type="chore"
+  branch_slug="$normalized_task"
+fi
+
+case "$branch_type" in
+  feat | fix | test | refactor | docs | chore | ci | perf | exp) ;;
+  *)
+    echo "branch type must be one of: feat, fix, test, refactor, docs, chore, ci, perf, exp" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "$branch_slug" == */* || ! "$branch_slug" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+  echo "task-slug must contain only letters, numbers, dot, underscore, and dash, and must start with a letter or number" >&2
+  exit 2
+fi
+
+current_repo_root="$(git rev-parse --show-toplevel)"
+if [[ "$base_ref" == "HEAD" ]]; then
+  base_ref="$(git -C "$current_repo_root" rev-parse HEAD)"
+fi
+
+repo_root="$current_repo_root"
+while IFS= read -r line || [[ -n "$line" ]]; do
+  case "$line" in
+    worktree\ *)
+      repo_root="${line#worktree }"
+      break
+      ;;
+  esac
+done < <(git -C "$current_repo_root" worktree list --porcelain)
+
+repo_name="$(basename "$repo_root")"
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+short_id="$(uuidgen | tr '[:upper:]' '[:lower:]' | cut -c1-8)"
+branch_base="${branch_type}/${branch_slug}"
+branch="$branch_base"
+
+branch_exists() {
+  local name="$1"
+  git -C "$repo_root" show-ref --verify --quiet "refs/heads/${name}" ||
+    git -C "$repo_root" show-ref --verify --quiet "refs/remotes/origin/${name}"
+}
+
+if branch_exists "$branch"; then
+  branch="${branch_base}-${short_id}"
+fi
+
+suffix_counter=2
+while branch_exists "$branch"; do
+  branch="${branch_base}-${short_id}-${suffix_counter}"
+  suffix_counter=$((suffix_counter + 1))
+done
+
+worktree_root="${repo_root}/.worktrees"
+worktree_dir_base="${branch_type}-${branch_slug}"
+worktree_path="${worktree_root}/${worktree_dir_base}"
+dir_suffix=2
+while [[ -e "$worktree_path" ]]; do
+  worktree_path="${worktree_root}/${worktree_dir_base}-${dir_suffix}"
+  dir_suffix=$((dir_suffix + 1))
+done
+
+if "$dry_run"; then
+  printf 'branch=%s\n' "$branch"
+  printf 'worktree=%s\n' "$worktree_path"
+  printf 'base_ref=%s\n' "$base_ref"
+  printf 'cli=%s\n' "$cli"
+  exit 0
+fi
+
+mkdir -p "$worktree_root"
+git -C "$repo_root" worktree add -b "$branch" "$worktree_path" "$base_ref" >&2
+
+write_metadata() {
+  local target="$1"
+  cat >"$target" <<JSON
+{
+  "task": "${normalized_task}",
+  "repo": "${repo_root}",
+  "repo_name": "${repo_name}",
+  "base_ref": "${base_ref}",
+  "branch": "${branch}",
+  "worktree": "${worktree_path}",
+  "created_at_utc": "${timestamp}",
+  "id": "${short_id}",
+  "owner": "${cli}"
+}
+JSON
+}
+
+write_metadata "${worktree_path}/.agent-session.json"
+# Back-compat: existing tooling (codex-worktrees from older runs, codex-task
+# function) may still look for .codex-session.json. Write it too when the
+# owner is codex; for claude, only the .agent-session.json is written.
+if [[ "$cli" == "codex" ]]; then
+  write_metadata "${worktree_path}/.codex-session.json"
+fi
+
+printf 'branch=%s\n' "$branch" >&2
+printf 'worktree=%s\n' "$worktree_path" >&2
+printf 'base_ref=%s\n' "$base_ref" >&2
+printf 'cli=%s\n' "$cli" >&2
+printf '%s\n' "$worktree_path"

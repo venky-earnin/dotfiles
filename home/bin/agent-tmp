@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# agent-tmp — create a traceable scratch dir under /private/tmp/agents/<repo>/
+# with .agent-session.json metadata. Agent-agnostic.
+
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+usage: agent-tmp [--cli codex|claude|other] <task-slug> [repo-path]
+example: agent-tmp profiler-trace-inspection
+example: agent-tmp --cli claude debug-attn-mask
+EOF
+}
+
+cli="${AGENT_CLI:-codex}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --cli)
+      cli="$2"
+      shift 2
+      ;;
+    --cli=*)
+      cli="${1#--cli=}"
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "unknown option: $1" >&2
+      usage
+      exit 2
+      ;;
+    *) break ;;
+  esac
+done
+
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  usage
+  exit 2
+fi
+
+case "$cli" in
+  codex | claude | other) ;;
+  *)
+    echo "--cli must be one of: codex, claude, other" >&2
+    exit 2
+    ;;
+esac
+
+task_slug="$1"
+repo_path="${2:-$(pwd)}"
+
+if [[ ! "$task_slug" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "task-slug may contain only letters, numbers, dot, underscore, and dash" >&2
+  exit 2
+fi
+
+if git -C "$repo_path" rev-parse --show-toplevel >/dev/null 2>&1; then
+  repo_root="$(git -C "$repo_path" rev-parse --show-toplevel)"
+  repo_name="$(basename "$repo_root")"
+  branch="$(git -C "$repo_root" branch --show-current || true)"
+  head="$(git -C "$repo_root" rev-parse --short HEAD || true)"
+else
+  repo_root="$repo_path"
+  repo_name="$(basename "$repo_path")"
+  branch=""
+  head=""
+fi
+
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+short_id="$(uuidgen | tr '[:upper:]' '[:lower:]' | cut -c1-8)"
+scratch_root="/private/tmp/agents/${repo_name}"
+scratch_path="${scratch_root}/${task_slug}--${timestamp}--${short_id}"
+
+mkdir -p "$scratch_path"
+
+cat >"${scratch_path}/.agent-session.json" <<JSON
+{
+  "task": "${task_slug}",
+  "repo": "${repo_root}",
+  "repo_name": "${repo_name}",
+  "branch": "${branch}",
+  "head": "${head}",
+  "scratch": "${scratch_path}",
+  "created_at_utc": "${timestamp}",
+  "id": "${short_id}",
+  "owner": "${cli}"
+}
+JSON
+
+# Back-compat: also write .codex-session.json for codex owner
+if [[ "$cli" == "codex" ]]; then
+  cp "${scratch_path}/.agent-session.json" "${scratch_path}/.codex-session.json"
+fi
+
+echo "$scratch_path"

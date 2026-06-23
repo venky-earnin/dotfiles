@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+# agent-worktrees — list worktrees for the current repo with rich status, and
+# optionally clean up stale ones and scratch dirs. Agent-agnostic.
+#
+# Modes:
+#   (default)              one row per worktree: dirty? meta? cleanup? ref path
+#   --status               richer: + ahead/behind, last commit, tmux session, CLI
+#   --clean --yes          remove clean non-main worktrees
+#   --clean-tmp --yes      remove traceable scratch dirs under
+#                          /private/tmp/agents/<repo> and /private/tmp/codex/<repo>,
+#                          plus common efm-* tmp artifacts
+
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+usage: agent-worktrees [--status] [--clean] [--clean-tmp] [--yes]
+
+Lists worktrees for the current repo. With --clean --yes, removes clean
+non-main worktrees. With --clean-tmp --yes, removes traceable scratch dirs.
+With --status, shows ahead/behind, last commit, tmux session, and CLI owner.
+EOF
+}
+
+status_mode=false
+clean=false
+clean_tmp=false
+yes=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --status) status_mode=true ;;
+    --clean) clean=true ;;
+    --clean-tmp) clean_tmp=true ;;
+    --yes) yes=true ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      usage
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+if { "$clean" || "$clean_tmp"; } && ! "$yes"; then
+  echo "cleanup requires --yes" >&2
+  exit 2
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+repo_name="$(basename "$repo_root")"
+log_dir="$HOME/.config/agents/cleanup-logs"
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+log_file="${log_dir}/${repo_name}-${timestamp}.log"
+mkdir -p "$log_dir"
+
+is_cleanup_candidate() {
+  local path="$1"
+  [[ "$path" == "$repo_root" ]] && return 1
+  return 0
+}
+
+read_metadata() {
+  # Read .agent-session.json or .codex-session.json (whichever exists).
+  # Echoes owner (cli) or empty.
+  local path="$1"
+  local key="$2"
+  local f
+  for f in "$path/.agent-session.json" "$path/.codex-session.json"; do
+    if [[ -f "$f" ]]; then
+      python3 -c "import json,sys; d=json.load(open('$f')); print(d.get('$key',''))" 2>/dev/null
+      return 0
+    fi
+  done
+}
+
+tmux_session_for() {
+  local path="$1"
+  command -v tmux >/dev/null 2>&1 || {
+    echo ""
+    return
+  }
+  # tmux exits nonzero when no server is running; with pipefail that would
+  # propagate out of this function and kill the caller under set -e.
+  { tmux list-sessions -F '#{session_path} #{session_name}' 2>/dev/null ||
+    true; } | awk -v p="$path" '$1 == p { print $2; exit }'
+}
+
+ahead_behind() {
+  local path="$1"
+  local ref="$2"
+  [[ -z "$ref" || "$ref" == "detached" ]] && {
+    echo "-"
+    return
+  }
+  local upstream
+  upstream="$(git -C "$path" rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" 2>/dev/null || true)"
+  if [[ -z "$upstream" ]]; then
+    echo "no-upstream"
+    return
+  fi
+  local counts
+  counts="$(git -C "$path" rev-list --left-right --count "${upstream}...HEAD" 2>/dev/null || echo "?/?")"
+  local behind ahead
+  behind="$(echo "$counts" | awk '{print $1}')"
+  ahead="$(echo "$counts" | awk '{print $2}')"
+  echo "+${ahead}/-${behind}"
+}
+
+last_commit() {
+  local path="$1"
+  git -C "$path" log -1 --format='%h %s' 2>/dev/null | cut -c1-60
+}
+
+worktree_time() {
+  # Display/sort timestamp: prefer .agent-session.json created_at_utc, fall
+  # back to last commit author time. Output: 'YYYY-MM-DD HH:MM' local time.
+  local path="$1"
+  local f raw out
+  for f in "$path/.agent-session.json" "$path/.codex-session.json"; do
+    if [[ -f "$f" ]]; then
+      raw="$(python3 -c "import json; d=json.load(open('$f')); print(d.get('created_at_utc') or d.get('created_at') or '')" 2>/dev/null || true)"
+      if [[ -n "$raw" ]]; then
+        out="$(python3 -c "
+import sys, datetime
+s = sys.argv[1]
+for fmt in ('%Y%m%dT%H%M%SZ', '%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%dT%H:%M:%S'):
+    try:
+        dt = datetime.datetime.strptime(s, fmt).replace(tzinfo=datetime.timezone.utc).astimezone()
+        print(dt.strftime('%Y-%m-%d %H:%M'))
+        break
+    except Exception:
+        pass
+else:
+    print(s)
+" "$raw" 2>/dev/null || true)"
+        if [[ -n "$out" ]]; then
+          echo "$out"
+          return
+        fi
+      fi
+    fi
+  done
+  git -C "$path" log -1 --format='%cd' --date=format-local:'%Y-%m-%d %H:%M' 2>/dev/null || echo "-"
+}
+
+current_path=""
+current_head=""
+current_ref=""
+
+if "$status_mode"; then
+  records=()
+else
+  printf '%-9s %-9s %-8s %-12s %s\n' "DIRTY" "METADATA" "CLEANUP" "REF" "PATH"
+  printf '%-9s %-9s %-8s %-12s %s\n' "-----" "--------" "-------" "---" "----"
+fi
+
+print_row_basic() {
+  local path="$1" _head="$2" ref="$3" dirty="$4" meta="$5" candidate="$6"
+  printf '%-9s %-9s %-8s %-12s %s\n' "$dirty" "$meta" "$candidate" "${ref:-detached}" "$path"
+}
+
+push_status_record() {
+  local path="$1" ref="$2" dirty="$3" meta="$4" cli="$5" ab="$6" lc="$7" tmux_s="$8" ts="$9"
+  # Use US (\x1f) as field separator — non-whitespace, so empty fields survive `read`.
+  local SEP=$'\x1f'
+  records+=("${ts:-0000-00-00 00:00}${SEP}${path}${SEP}${ref:-detached}${SEP}${dirty}${SEP}${meta}${SEP}${cli:-}${SEP}${ab}${SEP}${lc:--}${SEP}${tmux_s:--}")
+}
+
+finish_record() {
+  [[ -z "$current_path" ]] && return 0
+
+  local dirty="clean"
+  if [[ -n "$(git -C "$current_path" status --porcelain 2>/dev/null || true)" ]]; then
+    dirty="dirty"
+  fi
+
+  local meta="no-meta"
+  if [[ -f "$current_path/.agent-session.json" || -f "$current_path/.codex-session.json" ]]; then
+    meta="meta"
+  fi
+
+  if "$status_mode"; then
+    local cli ab lc tmux_s ts
+    cli="$(read_metadata "$current_path" owner)"
+    ab="$(ahead_behind "$current_path" "$current_ref")"
+    lc="$(last_commit "$current_path")"
+    tmux_s="$(tmux_session_for "$current_path")"
+    ts="$(worktree_time "$current_path")"
+    push_status_record "$current_path" "$current_ref" "$dirty" "$meta" "$cli" "$ab" "$lc" "$tmux_s" "$ts"
+  else
+    local candidate="keep"
+    if is_cleanup_candidate "$current_path"; then
+      candidate="remove"
+    fi
+    print_row_basic "$current_path" "$current_head" "$current_ref" "$dirty" "$meta" "$candidate"
+
+    if "$clean" && [[ "$dirty" == "clean" && "$candidate" == "remove" ]]; then
+      echo "REMOVE_WORKTREE path=$current_path ref=${current_ref:-detached} head=$current_head" >>"$log_file"
+      if ! git worktree remove --force "$current_path"; then
+        echo "FAILED_REMOVE_WORKTREE path=$current_path" >>"$log_file"
+      fi
+    elif "$clean" && [[ "$dirty" == "dirty" && "$candidate" == "remove" ]]; then
+      echo "SKIP_DIRTY_WORKTREE path=$current_path ref=${current_ref:-detached} head=$current_head" >>"$log_file"
+    fi
+  fi
+
+  current_path=""
+  current_head=""
+  current_ref=""
+}
+
+while IFS= read -r line || [[ -n "$line" ]]; do
+  if [[ -z "$line" ]]; then
+    finish_record
+    continue
+  fi
+
+  case "$line" in
+    worktree\ *)
+      finish_record
+      current_path="${line#worktree }"
+      ;;
+    HEAD\ *)
+      current_head="${line#HEAD }"
+      ;;
+    branch\ refs/heads/*)
+      current_ref="${line#branch refs/heads/}"
+      ;;
+    detached)
+      current_ref="detached"
+      ;;
+  esac
+done < <(git worktree list --porcelain)
+finish_record
+
+if "$status_mode"; then
+  if [[ ${#records[@]} -eq 0 ]]; then
+    echo "(no worktrees)"
+  else
+    first=true
+    while IFS=$'\x1f' read -r ts path ref dirty meta cli ab lc tmux_s; do
+      $first || echo
+      first=false
+      marker=""
+      [[ "$path" == "$repo_root" ]] && marker="  (current)"
+      bn="$(basename "$path")"
+      meta_disp="$meta"
+      [[ "$meta" == "meta" && -n "$cli" ]] && meta_disp="meta($cli)"
+      printf '● %s%s\n' "$bn" "$marker"
+      printf '  %-7s %s\n' "ref" "$ref"
+      printf '  %-7s %s\n' "time" "$ts"
+      printf '  %-7s %s   %s   %s\n' "status" "$dirty" "$meta_disp" "$ab"
+      printf '  %-7s %s\n' "commit" "$lc"
+      printf '  %-7s %s\n' "tmux" "$tmux_s"
+      printf '  %-7s %s\n' "path" "$path"
+    done < <(printf '%s\n' "${records[@]}" | sort -r)
+  fi
+fi
+
+if "$clean"; then
+  git worktree prune
+fi
+
+if "$clean_tmp"; then
+  tmp_candidates=()
+  while IFS= read -r path; do
+    tmp_candidates+=("$path")
+  done < <(
+    {
+      find /private/tmp/agents -mindepth 2 -maxdepth 3 -type d 2>/dev/null || true
+      find /private/tmp/codex -mindepth 2 -maxdepth 3 -type d 2>/dev/null || true
+      find /private/tmp -maxdepth 1 \( -name 'efm-*' -o -name 'codex-*' -o -name 'agents-*' \) -print 2>/dev/null || true
+      find /private/tmp -maxdepth 1 \( -name 'efm-*.out' -o -name 'efm-*.log' -o -name 'efm-*.json' -o -name 'efm-*.jsonl' -o -name 'efm-*.md' -o -name 'efm-*.txt' \) -print 2>/dev/null || true
+    } | sort -u
+  )
+
+  for path in "${tmp_candidates[@]}"; do
+    echo "REMOVE_TMP path=$path" >>"$log_file"
+    rm -rf "$path"
+  done
+fi
+
+if "$clean" || "$clean_tmp"; then
+  echo "cleanup log: $log_file"
+fi
