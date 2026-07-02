@@ -18,8 +18,6 @@ Branches default to type/slug; a short id is added only on collision.
 Branch types: feat, fix, test, refactor, docs, chore, ci, perf, exp.
 
 Metadata is written to .agent-session.json in the new worktree.
-For back-compat, .codex-session.json is also written (same content) when
---cli is codex or omitted (env AGENT_CLI=codex still wins).
 EOF
 }
 
@@ -170,12 +168,6 @@ JSON
 }
 
 write_metadata "${worktree_path}/.agent-session.json"
-# Back-compat: existing tooling (codex-worktrees from older runs, codex-task
-# function) may still look for .codex-session.json. Write it too when the
-# owner is codex; for claude, only the .agent-session.json is written.
-if [[ "$cli" == "codex" ]]; then
-  write_metadata "${worktree_path}/.codex-session.json"
-fi
 
 printf 'branch=%s\n' "$branch" >&2
 printf 'worktree=%s\n' "$worktree_path" >&2

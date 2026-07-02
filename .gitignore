@@ -8,6 +8,10 @@
 *.backup
 *.zwc
 *.zcompdump*
+__pycache__/
+*.pyc
+.agent-session.json
+.worktrees/
 
 # Auth, secrets, histories, and tool state should never enter this repo.
 home/.aws/
@@ -40,5 +44,7 @@ home/.codex/sessions/
 home/.codex/memories/
 home/.config/agents/LEARNINGS.md
 home/.config/agents/inbox/
+home/.config/agents/logs/
+home/.config/agents/reviews/
 home/.config/zsh/private.zsh
 home/.config/pip/pip.conf

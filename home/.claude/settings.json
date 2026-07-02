@@ -1,4 +1,7 @@
 {
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
   "permissions": {
     "allow": [
       "Bash(mkdir -p /tmp/staging-check)",
@@ -6,8 +9,21 @@
       "Bash(mkdir -p /tmp/staging-check/upload)",
       "Bash(cp -r code /tmp/staging-check/upload/code)",
       "Bash(cp -r tools /tmp/staging-check/upload/tools)",
-      "Bash(aws s3 *)",
-      "Bash(gh pr *)"
+      "Bash(aws s3 *)"
+    ],
+    "ask": [
+      "Bash(git push:*)",
+      "Bash(git merge:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr merge:*)",
+      "Bash(gh pr ready:*)",
+      "Bash(gh pr close:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(gh pr comment:*)",
+      "Bash(gh api -X POST:*)",
+      "Bash(gh api -X PUT:*)",
+      "Bash(gh api -X PATCH:*)",
+      "Bash(gh api -X DELETE:*)"
     ],
     "defaultMode": "auto"
   },
@@ -21,11 +37,35 @@
             "command": "$HOME/.claude/hooks/audit-log.sh"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.config/agents/hooks/publish-guard.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.config/agents/hooks/recall-on-error.sh"
+          }
+        ]
       }
     ],
     "Stop": [
       {
         "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.config/agents/hooks/review-state-reminder.sh"
+          },
           {
             "type": "command",
             "command": "$HOME/.claude/hooks/notify-stop.sh"
@@ -49,17 +89,14 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.claude/hooks/session-start-orient.sh"
+            "command": "$HOME/.config/agents/hooks/session-start-context.sh"
           }
         ]
       }
     ]
   },
-  "statusLine": {
-    "type": "command",
-    "command": "npx -y ccstatusline@latest",
-    "padding": 0,
-    "refreshInterval": 10
+  "worktree": {
+    "baseRef": "fresh"
   },
   "enabledPlugins": {
     "pyright-lsp@claude-plugins-official": true,
@@ -74,11 +111,17 @@
     }
   },
   "effortLevel": "xhigh",
+  "tui": "default",
   "skipDangerousModePermissionPrompt": true,
   "editorMode": "normal",
   "preferredNotifChannel": "auto",
+  "teammateMode": "auto",
   "remoteControlAtStartup": false,
   "inputNeededNotifEnabled": true,
   "agentPushNotifEnabled": true,
-  "skipAutoPermissionPrompt": true
+  "skipAutoPermissionPrompt": true,
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline-command.sh"
+  }
 }

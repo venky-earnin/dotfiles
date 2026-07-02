@@ -12,11 +12,11 @@
 # returns the same .git path from any worktree of the same repo.
 #
 # Usage:
-#   agent-inbox <message...>         # append a status line
-#   agent-inbox --tail [N]           # show last N lines (default 20)
-#   agent-inbox --tail-follow        # follow live (tail -f)
-#   agent-inbox --clear              # wipe the inbox (with confirmation)
-#   agent-inbox --path               # print the resolved INBOX path
+#   agent-inbox [--repo <namespace>] <message...>  # append a status line
+#   agent-inbox [--repo <namespace>] --tail [N]    # show last N lines
+#   agent-inbox [--repo <namespace>] --tail-follow # follow live (tail -f)
+#   agent-inbox [--repo <namespace>] --clear       # wipe the inbox
+#   agent-inbox [--repo <namespace>] --path        # print resolved INBOX path
 #
 # Format of each appended line:
 #   [YYYY-MM-DDTHH:MM:SSZ <session> <branch> wt:<wt-basename>] <message>
@@ -25,14 +25,16 @@ set -euo pipefail
 
 mode="append"
 n="20"
+namespace=""
+agents_config_home="${AGENTS_CONFIG_HOME:-${HOME}/.config/agents}"
 
 usage() {
   cat >&2 <<'EOF'
-usage: agent-inbox <message...>            # append a status line
-       agent-inbox --tail [N]              # show last N lines (default 20)
-       agent-inbox --tail-follow           # follow live (tail -f)
-       agent-inbox --clear                 # wipe the inbox (confirms first)
-       agent-inbox --path                  # print resolved INBOX path
+usage: agent-inbox [--repo <namespace>] <message...>   # append a status line
+       agent-inbox [--repo <namespace>] --tail [N]     # show last N lines
+       agent-inbox [--repo <namespace>] --tail-follow  # follow live (tail -f)
+       agent-inbox [--repo <namespace>] --clear        # wipe the inbox
+       agent-inbox [--repo <namespace>] --path         # print resolved INBOX path
 
 Each appended line:
   [YYYY-MM-DDTHH:MM:SSZ <session> <branch> wt:<wt-basename>] <message>
@@ -41,6 +43,14 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --repo | --namespace)
+      namespace="${2:-}"
+      shift 2
+      ;;
+    --repo=* | --namespace=*)
+      namespace="${1#*=}"
+      shift
+      ;;
     --tail)
       mode="tail"
       shift
@@ -69,19 +79,27 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Resolve the main repo identity from any worktree.
-git_common_dir="$(git rev-parse --git-common-dir 2>/dev/null || true)"
-if [[ -z "$git_common_dir" ]]; then
-  echo "agent-inbox: not inside a git repo" >&2
-  exit 2
+if [[ -n "$namespace" ]]; then
+  if [[ ! "$namespace" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "agent-inbox: --repo must match [A-Za-z0-9][A-Za-z0-9._-]*" >&2
+    exit 2
+  fi
+  main_repo_name="$namespace"
+else
+  # Resolve the main repo identity from any worktree.
+  git_common_dir="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+  if [[ -z "$git_common_dir" ]]; then
+    echo "agent-inbox: not inside a git repo; pass --repo <namespace> for non-git work" >&2
+    exit 2
+  fi
+  if [[ "$git_common_dir" != /* ]]; then
+    git_common_dir="$(pwd)/$git_common_dir"
+  fi
+  main_repo_root="$(cd "$(dirname "$git_common_dir")" && pwd)"
+  main_repo_name="$(basename "$main_repo_root")"
 fi
-if [[ "$git_common_dir" != /* ]]; then
-  git_common_dir="$(pwd)/$git_common_dir"
-fi
-main_repo_root="$(cd "$(dirname "$git_common_dir")" && pwd)"
-main_repo_name="$(basename "$main_repo_root")"
 
-inbox_dir="${HOME}/.config/agents/inbox/${main_repo_name}"
+inbox_dir="${agents_config_home}/inbox/${main_repo_name}"
 inbox="${inbox_dir}/INBOX.md"
 mkdir -p "$inbox_dir"
 

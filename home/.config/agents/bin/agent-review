@@ -1,0 +1,1041 @@
+#!/usr/bin/env python3
+"""agent-review: local pre-PR review ledger helper.
+
+The default path is cheap: Git work is reviewed by commit SHA and metadata.
+Only explicitly supplied artifacts are copied, and artifact storage is
+content-addressed by sha256.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import dataclasses
+import datetime as dt
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+
+SCHEMA_VERSION = 1
+VALID_STATES = {
+    "initialized",
+    "implementation_in_progress",
+    "review_requested",
+    "review_posted",
+    "addressed_needs_rereview",
+    "reviewed_no_blockers",
+    "blocked",
+    "published",
+    "closed",
+}
+SKIP_DIRS = {
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "node_modules",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+}
+LOGGED_COMMANDS = {"init", "resolve", "snapshot", "request", "post", "addressed", "migrate"}
+
+
+class AgentReviewError(Exception):
+    pass
+
+
+def die(msg: str, code: int = 2) -> None:
+    print(f"agent-review: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def config_home() -> Path:
+    return Path(os.environ.get("AGENTS_CONFIG_HOME", Path.home() / ".config" / "agents")).expanduser()
+
+
+def reviews_root() -> Path:
+    return Path(os.environ.get("AGENT_REVIEWS_ROOT", config_home() / "reviews")).expanduser()
+
+
+def event_log_path() -> Path:
+    return Path(os.environ.get("AGENT_REVIEW_EVENT_LOG", config_home() / "logs" / "agent-review-events.jsonl")).expanduser()
+
+
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def utc_stamp() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def run(cmd: list[str], cwd: Path | None = None, check: bool = False, text: bool = True) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=text, capture_output=True)
+    if check and proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise AgentReviewError(f"{' '.join(cmd)} failed: {detail}")
+    return proc
+
+
+def git_root(path: Path | None = None) -> Path | None:
+    proc = run(["git", "rev-parse", "--show-toplevel"], cwd=path or Path.cwd())
+    if proc.returncode != 0:
+        return None
+    return Path(proc.stdout.strip()).resolve()
+
+
+def git_main_repo_root(path: Path | None = None) -> Path | None:
+    cwd = path or Path.cwd()
+    proc = run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=cwd)
+    if proc.returncode != 0:
+        return None
+    common_dir = Path(proc.stdout.strip()).resolve()
+    return common_dir.parent
+
+
+def git_branch(repo: Path) -> str | None:
+    proc = run(["git", "branch", "--show-current"], cwd=repo)
+    if proc.returncode != 0:
+        return None
+    branch = proc.stdout.strip()
+    return branch or "(detached)"
+
+
+def git_head(repo: Path) -> str:
+    return run(["git", "rev-parse", "HEAD"], cwd=repo, check=True).stdout.strip()
+
+
+def git_status(repo: Path, untracked: bool = True) -> str:
+    flag = "--untracked-files=all" if untracked else "--untracked-files=no"
+    return run(["git", "status", "--porcelain", flag], cwd=repo, check=True).stdout
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def safe_name(path: Path) -> str:
+    name = path.name or "artifact"
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name)
+
+
+def validate_namespace(value: str, label: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value):
+        die(f"{label} must match [A-Za-z0-9][A-Za-z0-9._-]*")
+    return value
+
+
+def default_owner_cli() -> str:
+    explicit = os.environ.get("AGENT_CLI")
+    if explicit:
+        return explicit
+    if any(os.environ.get(name) for name in ("CLAUDE_PROJECT_DIR", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")):
+        return "claude"
+    return "codex"
+
+
+def validate_owner_cli(value: str) -> str:
+    if value not in {"codex", "claude", "other"}:
+        die("owner-cli must be one of: codex, claude, other")
+    return value
+
+
+def type_slug_to_task_key(type_slug: str) -> str:
+    if "/" not in type_slug:
+        die("type-slug must be shaped like type/slug")
+    t, slug = type_slug.split("/", 1)
+    if t not in {"feat", "fix", "test", "refactor", "docs", "chore", "ci", "perf", "exp"}:
+        die("type-slug type must be one of feat, fix, test, refactor, docs, chore, ci, perf, exp")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", slug):
+        die("type-slug slug must be lowercase letters, numbers, dot, underscore, or dash")
+    return f"{t}-{slug}"
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=False)
+            f.write("\n")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
+def atomic_write_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(value)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
+@contextlib.contextmanager
+def ledger_lock(ledger: Path):
+    ledger.mkdir(parents=True, exist_ok=True)
+    lock_path = ledger / ".lock"
+    with lock_path.open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def ledger_path(repo: str, task_key: str) -> Path:
+    return reviews_root() / repo / task_key
+
+
+def task_path(ledger: Path) -> Path:
+    return ledger / "task.json"
+
+
+def load_task(ledger: Path) -> dict[str, Any]:
+    path = task_path(ledger)
+    if not path.exists():
+        die(f"missing task.json at {path}")
+    task = read_json(path)
+    if task.get("review_state") not in VALID_STATES:
+        die(f"invalid review_state in {path}: {task.get('review_state')!r}")
+    return task
+
+
+def save_task(ledger: Path, task: dict[str, Any]) -> None:
+    task["last_updated_utc"] = utc_now()
+    atomic_write_json(task_path(ledger), task)
+
+
+def current_cli() -> str:
+    explicit = os.environ.get("AGENT_CLI")
+    if explicit:
+        return explicit
+    if any(os.environ.get(name) for name in ("CLAUDE_PROJECT_DIR", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")):
+        return "claude"
+    return "codex"
+
+
+def event_context(ledger: Path, task: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    context = {
+        "ledger": str(ledger),
+        "repo": task.get("repo"),
+        "task_key": task.get("task_key"),
+        "type_slug": task.get("type_slug"),
+        "review_state": task.get("review_state"),
+        "snapshot_id": task.get("latest_snapshot_id"),
+        "blocker_count": task.get("current_blocker_count"),
+    }
+    context.update(extra)
+    return context
+
+
+def set_event(args: argparse.Namespace, context: dict[str, Any]) -> None:
+    setattr(args, "_event_context", context)
+
+
+def append_event_log(args: argparse.Namespace, outcome: str, exit_code: int, error: str | None = None) -> None:
+    if getattr(args, "cmd", None) not in LOGGED_COMMANDS:
+        return
+    event = {
+        "schema_version": 1,
+        "ts_utc": utc_now(),
+        "cli": current_cli(),
+        "command": args.cmd,
+        "outcome": outcome,
+        "exit_code": exit_code,
+        "cwd": str(Path.cwd()),
+        "argv": sys.argv[1:],
+    }
+    event.update(getattr(args, "_event_context", {}) or {})
+    if error:
+        event["error"] = error
+    line = json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
+    path = event_log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, line.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        print(f"agent-review: warning: failed to append event log: {exc}", file=sys.stderr)
+
+
+def iter_ledgers(repo: str | None = None) -> list[Path]:
+    root = reviews_root()
+    if repo:
+        base = root / repo
+        return sorted(p for p in base.iterdir() if (p / "task.json").exists()) if base.exists() else []
+    if not root.exists():
+        return []
+    ledgers: list[Path] = []
+    for repo_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        ledgers.extend(sorted(p for p in repo_dir.iterdir() if (p / "task.json").exists()))
+    return ledgers
+
+
+def score_task(task: dict[str, Any], query: str, source: str | None = None) -> int:
+    q = query.strip().lower()
+    if not q:
+        return 0
+    score = 0
+    fields = {
+        "task_key": str(task.get("task_key", "")).lower(),
+        "type_slug": str(task.get("type_slug", "")).lower(),
+        "title": str(task.get("title", "")).lower(),
+        "owner_branch": str(task.get("owner_branch", "")).lower(),
+        "owner_worktree": str(task.get("owner_worktree", "")).lower(),
+        "source_path": str(task.get("source_path", "")).lower(),
+    }
+    if q in {fields["task_key"], fields["type_slug"]}:
+        score += 100
+    if q and q in fields["title"]:
+        score += 25
+    if fields["title"] and fields["title"] in q:
+        score += 20
+    if q and q in fields["task_key"]:
+        score += 15
+    if q and q in fields["type_slug"]:
+        score += 15
+    q_words = {w for w in re.split(r"[^a-z0-9]+", q) if len(w) >= 3}
+    haystack = " ".join(fields.values())
+    score += sum(2 for w in q_words if w in haystack)
+    if source:
+        src = str(Path(source).expanduser().resolve()).lower()
+        sources = [str(p).lower() for p in task.get("source_paths", [])]
+        if src == fields["source_path"] or src in sources:
+            score += 80
+    return score
+
+
+def resolve_ledgers(query: str, repo: str | None = None, source: str | None = None) -> list[tuple[int, Path, dict[str, Any]]]:
+    matches = []
+    for ledger in iter_ledgers(repo):
+        task = load_task(ledger)
+        score = score_task(task, query, source)
+        if score > 0:
+            matches.append((score, ledger, task))
+    return sorted(matches, key=lambda x: (-x[0], str(x[1])))
+
+
+def require_one_ledger(args: argparse.Namespace) -> Path:
+    if getattr(args, "ledger", None):
+        ledger = Path(args.ledger).expanduser().resolve()
+        load_task(ledger)
+        return ledger
+    if getattr(args, "repo", None) and getattr(args, "task_key", None):
+        ledger = ledger_path(args.repo, args.task_key)
+        load_task(ledger)
+        return ledger
+    query = getattr(args, "query", None) or getattr(args, "task", None) or getattr(args, "type_slug", None)
+    repo = getattr(args, "repo", None)
+    if not query and getattr(args, "task_key", None):
+        query = args.task_key
+    if not query:
+        current_repo = repo or current_repo_name()
+        candidates = iter_ledgers(current_repo)
+        if len(candidates) == 1:
+            return candidates[0]
+        die("specify --repo and --task-key, --ledger, or a unique query")
+    matches = resolve_ledgers(query, repo=repo, source=getattr(args, "source", None))
+    if len(matches) == 1:
+        return matches[0][1]
+    if not matches:
+        die(f"no ledger matches {query!r}")
+    lines = [f"multiple ledgers match {query!r}; specify --repo/--task-key or --ledger:"]
+    lines.extend(f"  {path} ({task.get('title')})" for _, path, task in matches)
+    die("\n".join(lines))
+
+
+def current_repo_name() -> str | None:
+    root = git_main_repo_root(Path.cwd())
+    return root.name if root else None
+
+
+def resolve_repo_arg(repo: str | None) -> str:
+    if repo:
+        return validate_namespace(repo, "repo")
+    root = git_main_repo_root(Path.cwd())
+    if not root:
+        die("not inside a git repo; pass --repo <namespace>")
+    return validate_namespace(root.name, "repo")
+
+
+def next_snapshot_id(ledger: Path, suffix: str) -> str:
+    snaps = ledger / "snapshots"
+    existing = []
+    if snaps.exists():
+        for p in snaps.iterdir():
+            m = re.match(r"^(\d+)-", p.name)
+            if m:
+                existing.append(int(m.group(1)))
+    n = (max(existing) + 1) if existing else 1
+    return f"{n:03d}-{utc_stamp()}-{suffix}"
+
+
+def next_review_number(ledger: Path) -> str:
+    nums = []
+    reviews = ledger / "reviews"
+    if reviews.exists():
+        for p in reviews.iterdir():
+            m = re.match(r"^r(\d+)-", p.name)
+            if m:
+                nums.append(int(m.group(1)))
+    n = (max(nums) + 1) if nums else 1
+    return f"r{n:03d}"
+
+
+def parse_snapshot_from_review(path: Path) -> str | None:
+    if path.exists():
+        text = path.read_text(encoding="utf-8", errors="replace")
+        patterns = [
+            r"Reviewed snapshot:\*\*\s*`([^`]+)`",
+            r"snapshot\s+([0-9]{3}-[0-9T]+Z-[A-Za-z0-9._-]+)",
+        ]
+        for pat in patterns:
+            m = re.search(pat, text)
+            if m:
+                return m.group(1)
+    name = path.name
+    m = re.match(r"^r\d+-(\d{3}-\d{8}T\d{6}Z-[A-Za-z0-9._-]+)-", name)
+    return m.group(1) if m else None
+
+
+def collect_artifacts(paths: list[str], dirs: list[str], max_files: int, max_bytes: int) -> tuple[list[Path], bool]:
+    files: list[Path] = []
+    truncated = False
+    total = 0
+    for item in paths:
+        p = Path(item).expanduser().resolve()
+        if not p.is_file():
+            die(f"artifact is not a file: {p}")
+        size = p.stat().st_size
+        if len(files) >= max_files or total + size > max_bytes:
+            truncated = True
+            continue
+        files.append(p)
+        total += size
+    for item in dirs:
+        root = Path(item).expanduser().resolve()
+        if not root.is_dir():
+            die(f"artifact-dir is not a directory: {root}")
+        for current, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+            for name in sorted(filenames):
+                p = Path(current) / name
+                if not p.is_file():
+                    continue
+                size = p.stat().st_size
+                if len(files) >= max_files or total + size > max_bytes:
+                    truncated = True
+                    continue
+                files.append(p.resolve())
+                total += size
+    return files, truncated
+
+
+def store_artifacts(ledger: Path, files: list[Path]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    root = ledger / "artifacts" / "by-sha256"
+    for source in files:
+        digest = sha256_file(source)
+        dest_dir = root / digest
+        dest = dest_dir / safe_name(source)
+        copied = False
+        if not dest.exists():
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, dest)
+            copied = True
+        records.append(
+            {
+                "source_path": str(source),
+                "sha256": digest,
+                "size_bytes": source.stat().st_size,
+                "storage_path": str(dest.relative_to(ledger)),
+                "copied": copied,
+            }
+        )
+    return records
+
+
+def artifact_revision(records: list[dict[str, Any]]) -> str | None:
+    if not records:
+        return None
+    if len(records) == 1:
+        return str(records[0]["sha256"])
+    stable = sorted(
+        (
+            {"name": safe_name(Path(str(r["source_path"]))), "sha256": str(r["sha256"])}
+            for r in records
+        ),
+        key=lambda item: (item["sha256"], item["name"]),
+    )
+    compact = json.dumps(stable, sort_keys=True, separators=(",", ":"))
+    return sha256_text(compact)
+
+
+def write_snapshot_files(
+    ledger: Path,
+    snapshot_id: str,
+    snapshot: dict[str, Any],
+    git_status_text: str,
+    diff_text: str,
+    artifact_records: list[dict[str, Any]],
+) -> None:
+    snap_dir = ledger / "snapshots" / snapshot_id
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(snap_dir / "snapshot.json", snapshot)
+    atomic_write_text(snap_dir / "git-status.txt", git_status_text)
+    atomic_write_text(snap_dir / "diff.patch", diff_text)
+    atomic_write_json(snap_dir / "artifacts.json", {"artifacts": artifact_records})
+    checksums = "".join(f"{r['sha256']}  {r['storage_path']}\n" for r in artifact_records)
+    atomic_write_text(snap_dir / "checksums.sha256", checksums)
+
+
+def post_inbox(repo: str, message: str) -> bool:
+    exe = shutil.which("agent-inbox")
+    if not exe:
+        return False
+    proc = run([exe, "--repo", repo, message])
+    return proc.returncode == 0
+
+
+def cmd_init(args: argparse.Namespace) -> None:
+    repo = resolve_repo_arg(args.repo)
+    task_key = type_slug_to_task_key(args.type_slug)
+    owner_cli = validate_owner_cli(args.owner_cli)
+    source_paths = [str(Path(s).expanduser().resolve()) for s in args.source]
+    existing = resolve_ledgers(args.title, repo=repo, source=source_paths[0] if source_paths else None)
+    exact = [m for m in existing if m[2].get("task_key") == task_key or m[2].get("type_slug") == args.type_slug]
+    if len(exact) == 1:
+        set_event(args, event_context(exact[0][1], exact[0][2], reused_existing=True))
+        print(exact[0][1])
+        return
+    if len(exact) > 1:
+        die("multiple existing ledgers match:\n" + "\n".join(f"  {p}" for _, p, _ in exact))
+
+    root = git_root(Path.cwd())
+    repo_root = root or Path.cwd().resolve()
+    ledger = ledger_path(repo, task_key)
+    with ledger_lock(ledger):
+        if task_path(ledger).exists():
+            print(ledger)
+            return
+        task = {
+            "schema_version": SCHEMA_VERSION,
+            "repo": repo,
+            "repo_root": str(repo_root),
+            "title": args.title,
+            "type_slug": args.type_slug,
+            "task_key": task_key,
+            "owner_cli": owner_cli,
+            "owner_worktree": str(repo_root),
+            "owner_branch": git_branch(root) if root else None,
+            "base_ref": args.base_ref,
+            "source_paths": source_paths,
+            "source_path": source_paths[0] if source_paths else None,
+            "latest_snapshot_id": None,
+            "latest_snapshot_sha": None,
+            "latest_artifact_revision": None,
+            "latest_review_path": None,
+            "latest_resolution_path": None,
+            "review_state": "initialized",
+            "current_blocker_count": None,
+            "verification": {
+                "required": bool(args.verification_required),
+                "last_command": None,
+                "last_status": None,
+                "last_ran_at_utc": None,
+            },
+            "last_updated_utc": utc_now(),
+            "notes": args.notes or "",
+        }
+        for sub in ["snapshots", "reviews", "resolutions", "artifacts/by-sha256", "checkouts"]:
+            (ledger / sub).mkdir(parents=True, exist_ok=True)
+        atomic_write_json(task_path(ledger), task)
+        set_event(args, event_context(ledger, task, reused_existing=False))
+    print(ledger)
+
+
+def cmd_resolve(args: argparse.Namespace) -> None:
+    matches = resolve_ledgers(args.query, repo=args.repo, source=args.source)
+    if len(matches) == 1:
+        set_event(args, event_context(matches[0][1], matches[0][2]))
+        print(matches[0][1])
+        return
+    if not matches:
+        die(f"no ledger matches {args.query!r}", 1)
+    lines = [f"multiple ledgers match {args.query!r}:"]
+    lines.extend(f"  {p} ({task.get('title')})" for _, p, task in matches)
+    die("\n".join(lines), 2)
+
+
+def cmd_path(args: argparse.Namespace) -> None:
+    print(require_one_ledger(args))
+
+
+def cmd_snapshot(args: argparse.Namespace) -> None:
+    ledger = require_one_ledger(args)
+    preverify: dict[str, Any] | None = None
+    preverify_output = ""
+    if args.verify:
+        pre_task = load_task(ledger)
+        pre_repo_root = Path(pre_task.get("repo_root") or Path.cwd()).expanduser().resolve()
+        start = time.time()
+        proc = subprocess.run(args.verify, cwd=str(pre_repo_root), shell=True, text=True, capture_output=True)
+        duration = time.time() - start
+        preverify_output = (proc.stdout or "") + (proc.stderr or "")
+        preverify = {
+            "command": args.verify,
+            "exit_code": proc.returncode,
+            "duration_seconds": round(duration, 3),
+            "status": "passed" if proc.returncode == 0 else "failed",
+        }
+    with ledger_lock(ledger):
+        task = load_task(ledger)
+        repo_root = Path(task.get("repo_root") or Path.cwd()).expanduser().resolve()
+        root = git_root(repo_root)
+        artifact_files, truncated = collect_artifacts(args.artifact, args.artifact_dir, args.max_files, args.max_bytes)
+        if not root and not artifact_files:
+            die("non-git snapshots require at least one explicit --artifact or --artifact-dir")
+        if root:
+            dirty = git_status(root, untracked=False)
+            if dirty and not args.dirty_copy:
+                die("dirty tracked files; commit or amend before review")
+            head = git_head(root)
+            suffix = head[:7]
+            snapshot_sha = head
+            status_text = run(["git", "status", "--short", "--branch"], cwd=root, check=True).stdout
+            base_ref = task.get("base_ref")
+            if base_ref:
+                diff_proc = run(["git", "diff", f"{base_ref}..{head}"], cwd=root)
+                diff_text = diff_proc.stdout if diff_proc.returncode == 0 else diff_proc.stderr
+            else:
+                diff_text = run(["git", "show", "--format=fuller", "--stat", "--patch", head], cwd=root, check=True).stdout
+        else:
+            suffix = "local"
+            snapshot_sha = None
+            status_text = f"not a git repository: {repo_root}\n"
+            diff_text = "Non-git snapshot; review explicit artifacts and snapshot.json provenance.\n"
+
+        artifact_records = store_artifacts(ledger, artifact_files)
+        revision = artifact_revision(artifact_records)
+        snapshot_id = next_snapshot_id(ledger, suffix)
+        verification = dict(task.get("verification") or {})
+        verify_info = None
+        if preverify:
+            verify_log = ledger / "snapshots" / snapshot_id / "verify.log"
+            atomic_write_text(verify_log, preverify_output)
+            status = str(preverify["status"])
+            verification.update(
+                {
+                    "required": verification.get("required", False),
+                    "last_command": preverify["command"],
+                    "last_status": status,
+                    "last_ran_at_utc": utc_now(),
+                    "last_output_path": str(verify_log),
+                }
+            )
+            verify_info = {
+                "command": preverify["command"],
+                "exit_code": preverify["exit_code"],
+                "duration_seconds": preverify["duration_seconds"],
+                "output_path": str(verify_log),
+                "status": status,
+            }
+        snapshot = {
+            "snapshot_id": snapshot_id,
+            "created_at_utc": utc_now(),
+            "repo": task.get("repo"),
+            "task_key": task.get("task_key"),
+            "source_paths": task.get("source_paths") or [],
+            "origin_commit": snapshot_sha,
+            "artifact_revision": revision,
+            "artifact_count": len(artifact_records),
+            "artifact_dir_truncated": truncated,
+            "source_worktree_state": status_text.strip(),
+            "verification": verify_info,
+            "previous_snapshot_id": task.get("latest_snapshot_id"),
+            "previous_snapshot_sha": task.get("latest_snapshot_sha"),
+            "previous_artifact_revision": task.get("latest_artifact_revision"),
+        }
+        write_snapshot_files(ledger, snapshot_id, snapshot, status_text, diff_text, artifact_records)
+        task["latest_snapshot_id"] = snapshot_id
+        task["latest_snapshot_sha"] = snapshot_sha
+        task["latest_artifact_revision"] = revision
+        task["verification"] = verification
+        if verify_info and verify_info["status"] == "failed" and not args.request_anyway:
+            task["review_state"] = "implementation_in_progress"
+        elif task.get("review_state") in {
+            "initialized",
+            "review_requested",
+            "review_posted",
+            "addressed_needs_rereview",
+            "reviewed_no_blockers",
+            "blocked",
+        }:
+            task["review_state"] = "implementation_in_progress"
+        save_task(ledger, task)
+        set_event(args, event_context(ledger, task, created_snapshot_id=snapshot_id, verification_status=verify_info["status"] if verify_info else None))
+    print(snapshot_id)
+
+
+def cmd_request(args: argparse.Namespace) -> None:
+    ledger = require_one_ledger(args)
+    with ledger_lock(ledger):
+        task = load_task(ledger)
+        snapshot_id = task.get("latest_snapshot_id")
+        if not snapshot_id:
+            die("cannot request review without a latest snapshot")
+        verification = task.get("verification") or {}
+        if verification.get("required") and verification.get("last_status") != "passed":
+            if not (args.request_anyway and args.reason):
+                die("verification is required and has not passed; use --request-anyway --reason to override")
+        if (task.get("current_blocker_count") or 0) > 0:
+            if not task.get("latest_resolution_path"):
+                die("cannot request review with open blockers and no resolution file")
+        task["review_state"] = "review_requested"
+        if args.message:
+            task["notes"] = (task.get("notes") or "") + f"\nReview request: {args.message}"
+        posted = post_inbox(str(task["repo"]), f"review requested for {task['task_key']} @ {snapshot_id}")
+        if not posted:
+            task["notes"] = (task.get("notes") or "") + "\nINBOX pointer skipped; agent-inbox unavailable or failed."
+        save_task(ledger, task)
+        set_event(args, event_context(ledger, task, requested_reviewer=args.reviewer, inbox_posted=posted))
+    print(snapshot_id)
+
+
+def cmd_post(args: argparse.Namespace) -> None:
+    ledger = require_one_ledger(args)
+    review_file = Path(args.file).expanduser().resolve()
+    if not review_file.is_file():
+        die(f"review file not found: {review_file}")
+    with ledger_lock(ledger):
+        task = load_task(ledger)
+        snapshot_id = task.get("latest_snapshot_id") if args.snapshot == "latest" else args.snapshot
+        if not snapshot_id:
+            die("missing snapshot id")
+        reviewed_snapshot = parse_snapshot_from_review(review_file)
+        if reviewed_snapshot and reviewed_snapshot != snapshot_id and not args.stale_ok:
+            die(f"stale review file: {reviewed_snapshot} != requested {snapshot_id}")
+        if snapshot_id != task.get("latest_snapshot_id") and not args.stale_ok:
+            die(f"stale review: {snapshot_id} != latest {task.get('latest_snapshot_id')}")
+        reviews_dir = (ledger / "reviews").resolve()
+        try:
+            review_file.relative_to(reviews_dir)
+            in_ledger_reviews = True
+        except ValueError:
+            in_ledger_reviews = False
+        if in_ledger_reviews:
+            dest = review_file
+        else:
+            prefix = next_review_number(ledger)
+            dest = ledger / "reviews" / f"{prefix}-{snapshot_id}-{args.reviewer}-{utc_stamp()}.md"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(review_file, dest)
+        blockers = args.blockers
+        task["latest_review_path"] = str(dest)
+        task["current_blocker_count"] = blockers
+        task["review_state"] = "blocked" if blockers > 0 else "reviewed_no_blockers"
+        posted = post_inbox(str(task["repo"]), f"review note for {task['task_key']} @ {snapshot_id} -> {dest}; blockers={blockers}")
+        if not posted:
+            task["notes"] = (task.get("notes") or "") + "\nINBOX review pointer skipped; agent-inbox unavailable or failed."
+        save_task(ledger, task)
+        set_event(args, event_context(ledger, task, reviewer=args.reviewer, reviewed_snapshot_id=snapshot_id, review_path=str(dest), inbox_posted=posted))
+    print(dest)
+
+
+def cmd_addressed(args: argparse.Namespace) -> None:
+    ledger = require_one_ledger(args)
+    resolution_file = Path(args.file).expanduser().resolve()
+    if not resolution_file.is_file():
+        die(f"resolution file not found: {resolution_file}")
+    with ledger_lock(ledger):
+        task = load_task(ledger)
+        review_ref = args.review
+        review_path = Path(review_ref).expanduser()
+        if not review_path.exists():
+            reviews = sorted((ledger / "reviews").glob(f"{review_ref}*.md"))
+            if len(reviews) != 1:
+                die(f"review {review_ref!r} did not resolve to exactly one file")
+            review_path = reviews[0]
+        reviewed_snapshot = parse_snapshot_from_review(review_path)
+        if not reviewed_snapshot:
+            die(f"could not parse reviewed snapshot from {review_path}")
+        if not (ledger / "snapshots" / reviewed_snapshot).is_dir():
+            die(f"reviewed snapshot does not exist in this ledger: {reviewed_snapshot}")
+        latest = task.get("latest_snapshot_id")
+        if not latest or latest == reviewed_snapshot:
+            die("addressed requires a newer latest snapshot than the reviewed snapshot")
+        prefix_match = re.match(r"^(r\d+)-", review_path.name)
+        prefix = prefix_match.group(1) if prefix_match else review_path.stem.split("-", 1)[0]
+        implementer = args.implementer or task.get("owner_cli") or "implementer"
+        dest = ledger / "resolutions" / f"{prefix}-{reviewed_snapshot}-addressed-{implementer}-{utc_stamp()}.md"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(resolution_file, dest)
+        task["latest_resolution_path"] = str(dest)
+        task["review_state"] = "addressed_needs_rereview"
+        posted = post_inbox(str(task["repo"]), f"addressed review {prefix} for {task['task_key']} @ {latest} -> {dest}")
+        if not posted:
+            task["notes"] = (task.get("notes") or "") + "\nINBOX resolution pointer skipped; agent-inbox unavailable or failed."
+        save_task(ledger, task)
+        set_event(args, event_context(ledger, task, review_ref=review_ref, reviewed_snapshot_id=reviewed_snapshot, resolution_path=str(dest), inbox_posted=posted))
+    print(dest)
+
+
+def legacy_artifacts(snapshot_dir: Path) -> list[Path]:
+    art_dir = snapshot_dir / "artifacts"
+    if not art_dir.exists():
+        return []
+    return sorted(p for p in art_dir.rglob("*") if p.is_file())
+
+
+def migrate_snapshot(ledger: Path, snapshot_dir: Path, apply: bool) -> dict[str, Any] | None:
+    if (snapshot_dir / "artifacts.json").exists() and not legacy_artifacts(snapshot_dir):
+        return None
+    files = legacy_artifacts(snapshot_dir)
+    if not files:
+        return None
+    records = []
+    for source in files:
+        digest = sha256_file(source)
+        dest = ledger / "artifacts" / "by-sha256" / digest / safe_name(source)
+        records.append(
+            {
+                "source_path": str(source),
+                "sha256": digest,
+                "size_bytes": source.stat().st_size,
+                "storage_path": str(dest.relative_to(ledger)),
+                "legacy_path": str(source.relative_to(ledger)),
+            }
+        )
+        if apply and not dest.exists():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(dest))
+        elif apply:
+            source.unlink()
+    if apply:
+        art_dir = snapshot_dir / "artifacts"
+        if art_dir.exists():
+            for root, dirs, _files in os.walk(art_dir, topdown=False):
+                for d in dirs:
+                    path = Path(root) / d
+                    with contextlib.suppress(OSError):
+                        path.rmdir()
+            with contextlib.suppress(OSError):
+                art_dir.rmdir()
+        atomic_write_json(snapshot_dir / "artifacts.json", {"artifacts": records, "migrated_from_legacy": True})
+        checksums = "".join(f"{r['sha256']}  {r['storage_path']}\n" for r in records)
+        atomic_write_text(snapshot_dir / "checksums.sha256", checksums)
+    return {"snapshot": snapshot_dir.name, "artifact_count": len(records), "apply": apply}
+
+
+def cmd_migrate(args: argparse.Namespace) -> None:
+    targets = [require_one_ledger(args)] if (args.ledger or args.repo or args.task_key or args.query) else iter_ledgers()
+    apply = bool(args.apply)
+    results = []
+    for ledger in targets:
+        with ledger_lock(ledger):
+            snaps = ledger / "snapshots"
+            if not snaps.exists():
+                continue
+            for snap in sorted(p for p in snaps.iterdir() if p.is_dir()):
+                result = migrate_snapshot(ledger, snap, apply)
+                if result:
+                    result["ledger"] = str(ledger)
+                    results.append(result)
+    set_event(args, {"migration_count": len(results), "apply": apply})
+    print(json.dumps({"apply": apply, "migrations": results}, indent=2))
+
+
+def status_rows(repo: str | None = None, current: bool = False) -> list[dict[str, Any]]:
+    target_repo = repo
+    if current and not target_repo:
+        target_repo = current_repo_name()
+    rows = []
+    for ledger in iter_ledgers(target_repo):
+        task = load_task(ledger)
+        owner_worktree = task.get("owner_worktree")
+        owner_worktree_realpath = (
+            str(Path(str(owner_worktree)).expanduser().resolve(strict=False))
+            if owner_worktree
+            else None
+        )
+        rows.append(
+            {
+                "state": task.get("review_state"),
+                "blockers": task.get("current_blocker_count"),
+                "snapshot": task.get("latest_snapshot_id"),
+                "owner": task.get("owner_cli"),
+                "owner_branch": task.get("owner_branch"),
+                "owner_worktree": owner_worktree,
+                "owner_worktree_realpath": owner_worktree_realpath,
+                "task_key": task.get("task_key"),
+                "type_slug": task.get("type_slug"),
+                "title": task.get("title"),
+                "repo": task.get("repo"),
+                "path": str(ledger),
+            }
+        )
+    return rows
+
+
+def cmd_status(args: argparse.Namespace) -> None:
+    rows = status_rows(repo=args.repo, current=args.current)
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        print("(no review ledgers)")
+        return
+    if args.compact:
+        for r in rows:
+            print(f"{r['state']} blockers={r['blockers']} snapshot={r['snapshot']} {r['repo']}/{r['task_key']}")
+        return
+    print(f"{'STATE':24} {'BLOCKERS':8} {'SNAPSHOT':28} {'OWNER':8} {'TASK':28} PATH")
+    for r in rows:
+        print(
+            f"{str(r['state']):24} {str(r['blockers']):8} {str(r['snapshot']):28} "
+            f"{str(r['owner']):8} {str(r['task_key']):28} {r['path']}"
+        )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="agent-review")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("init")
+    p.add_argument("--title", required=True)
+    p.add_argument("--type-slug", required=True)
+    p.add_argument("--owner-cli", default=default_owner_cli())
+    p.add_argument("--repo")
+    p.add_argument("--source", action="append", default=[])
+    p.add_argument("--base-ref")
+    p.add_argument("--verification-required", action="store_true")
+    p.add_argument("--notes")
+    p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser("resolve")
+    p.add_argument("query")
+    p.add_argument("--repo")
+    p.add_argument("--source")
+    p.set_defaults(func=cmd_resolve)
+
+    def ledger_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--ledger")
+        p.add_argument("--repo")
+        p.add_argument("--task-key")
+        p.add_argument("--query")
+        p.add_argument("--source")
+
+    p = sub.add_parser("path")
+    ledger_args(p)
+    p.set_defaults(func=cmd_path)
+
+    p = sub.add_parser("snapshot")
+    ledger_args(p)
+    p.add_argument("--verify")
+    p.add_argument("--request-anyway", action="store_true")
+    p.add_argument("--dirty-copy", action="store_true")
+    p.add_argument("--artifact", action="append", default=[])
+    p.add_argument("--artifact-dir", action="append", default=[])
+    p.add_argument("--max-files", type=int, default=500)
+    p.add_argument("--max-bytes", type=int, default=250 * 1024 * 1024)
+    p.set_defaults(func=cmd_snapshot)
+
+    p = sub.add_parser("request")
+    ledger_args(p)
+    p.add_argument("--reviewer")
+    p.add_argument("--message")
+    p.add_argument("--request-anyway", action="store_true")
+    p.add_argument("--reason")
+    p.set_defaults(func=cmd_request)
+
+    p = sub.add_parser("post")
+    ledger_args(p)
+    p.add_argument("--reviewer", required=True)
+    p.add_argument("--snapshot", default="latest")
+    p.add_argument("--blockers", required=True, type=int)
+    p.add_argument("--file", required=True)
+    p.add_argument("--stale-ok", action="store_true")
+    p.set_defaults(func=cmd_post)
+
+    p = sub.add_parser("addressed")
+    ledger_args(p)
+    p.add_argument("--review", required=True)
+    p.add_argument("--file", required=True)
+    p.add_argument("--implementer")
+    p.set_defaults(func=cmd_addressed)
+
+    p = sub.add_parser("status")
+    p.add_argument("--all", action="store_true")
+    p.add_argument("--repo")
+    p.add_argument("--current", action="store_true")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--compact", action="store_true")
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("migrate")
+    ledger_args(p)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--apply", action="store_true")
+    p.set_defaults(func=cmd_migrate)
+
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    try:
+        args.func(args)
+    except AgentReviewError as exc:
+        append_event_log(args, "failed", 2, str(exc))
+        die(str(exc))
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 1
+        append_event_log(args, "failed", code)
+        raise
+    except Exception as exc:
+        append_event_log(args, "failed", 1, str(exc))
+        raise
+    else:
+        append_event_log(args, "completed", 0)
+
+
+if __name__ == "__main__":
+    main()

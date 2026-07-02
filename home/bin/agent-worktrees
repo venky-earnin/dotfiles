@@ -52,7 +52,13 @@ if { "$clean" || "$clean_tmp"; } && ! "$yes"; then
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
-repo_name="$(basename "$repo_root")"
+git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+if [[ -n "$git_common_dir" ]]; then
+  main_repo_root="$(dirname "$git_common_dir")"
+else
+  main_repo_root="$repo_root"
+fi
+repo_name="$(basename "$main_repo_root")"
 log_dir="$HOME/.config/agents/cleanup-logs"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 log_file="${log_dir}/${repo_name}-${timestamp}.log"
@@ -116,6 +122,10 @@ last_commit() {
   git -C "$path" log -1 --format='%h %s' 2>/dev/null | cut -c1-60
 }
 
+realpath_for() {
+  python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null || printf '%s\n' "$1"
+}
+
 worktree_time() {
   # Display/sort timestamp: prefer .agent-session.json created_at_utc, fall
   # back to last commit author time. Output: 'YYYY-MM-DD HH:MM' local time.
@@ -151,24 +161,72 @@ else:
 current_path=""
 current_head=""
 current_ref=""
+review_json="[]"
 
 if "$status_mode"; then
   records=()
+  if command -v agent-review >/dev/null 2>&1; then
+    review_json="$(agent-review status --repo "$repo_name" --json 2>/dev/null || printf '[]')"
+  fi
 else
   printf '%-9s %-9s %-8s %-12s %s\n' "DIRTY" "METADATA" "CLEANUP" "REF" "PATH"
   printf '%-9s %-9s %-8s %-12s %s\n' "-----" "--------" "-------" "---" "----"
 fi
 
 print_row_basic() {
-  local path="$1" _head="$2" ref="$3" dirty="$4" meta="$5" candidate="$6"
+  local path="$1" ref="$3" dirty="$4" meta="$5" candidate="$6"
   printf '%-9s %-9s %-8s %-12s %s\n' "$dirty" "$meta" "$candidate" "${ref:-detached}" "$path"
 }
 
 push_status_record() {
-  local path="$1" ref="$2" dirty="$3" meta="$4" cli="$5" ab="$6" lc="$7" tmux_s="$8" ts="$9"
+  local path="$1" ref="$2" dirty="$3" meta="$4" cli="$5" ab="$6" lc="$7" tmux_s="$8" ts="$9" review="${10}"
   # Use US (\x1f) as field separator — non-whitespace, so empty fields survive `read`.
   local SEP=$'\x1f'
-  records+=("${ts:-0000-00-00 00:00}${SEP}${path}${SEP}${ref:-detached}${SEP}${dirty}${SEP}${meta}${SEP}${cli:-}${SEP}${ab}${SEP}${lc:--}${SEP}${tmux_s:--}")
+  records+=("${ts:-0000-00-00 00:00}${SEP}${path}${SEP}${ref:-detached}${SEP}${dirty}${SEP}${meta}${SEP}${cli:-}${SEP}${ab}${SEP}${lc:--}${SEP}${tmux_s:--}${SEP}${review:-}")
+}
+
+review_for_worktree() {
+  local path="$1" ref="$2"
+  if [[ "$review_json" == "[]" ]] || ! command -v jq >/dev/null 2>&1; then
+    echo "-"
+    return
+  fi
+
+  local path_real
+  path_real="$(realpath_for "$path")"
+  local task_key=""
+  if [[ -n "$ref" && "$ref" != "detached" ]]; then
+    task_key="${ref//\//-}"
+  fi
+
+  printf '%s' "$review_json" | jq -r \
+    --arg path "$path" \
+    --arg path_real "$path_real" \
+    --arg branch "$ref" \
+    --arg task_key "$task_key" '
+      def fmt_review($r):
+        "\($r.state) blockers=\($r.blockers // "?") snapshot=\($r.snapshot // "-") task=\($r.task_key)";
+      def ambiguous($rows):
+        "\($rows | length) ledgers: \($rows | map(.task_key) | join(","))";
+      def choose($rows):
+        if ($rows | length) == 0 then empty
+        elif ($rows | length) == 1 then fmt_review($rows[0])
+        else ambiguous($rows)
+        end;
+
+      [ .[] | select(((.owner_worktree // "") == $path) or ((.owner_worktree_realpath // "") == $path_real)) ] as $path_matches |
+      [ .[] | select((.owner_branch // "") == $branch and ($branch != "" and $branch != "detached")) ] as $branch_matches |
+      [ .[] | select((.task_key // "") == $task_key and ($task_key != "")) ] as $task_matches |
+      if ($path_matches | length) > 0 then
+        choose($path_matches)
+      elif ($branch_matches | length) > 0 then
+        choose($branch_matches)
+      elif ($task_matches | length) > 0 then
+        choose($task_matches)
+      else
+        "-"
+      end
+    ' 2>/dev/null || echo "-"
 }
 
 finish_record() {
@@ -185,13 +243,14 @@ finish_record() {
   fi
 
   if "$status_mode"; then
-    local cli ab lc tmux_s ts
+    local cli ab lc tmux_s ts review
     cli="$(read_metadata "$current_path" owner)"
     ab="$(ahead_behind "$current_path" "$current_ref")"
     lc="$(last_commit "$current_path")"
     tmux_s="$(tmux_session_for "$current_path")"
     ts="$(worktree_time "$current_path")"
-    push_status_record "$current_path" "$current_ref" "$dirty" "$meta" "$cli" "$ab" "$lc" "$tmux_s" "$ts"
+    review="$(review_for_worktree "$current_path" "$current_ref")"
+    push_status_record "$current_path" "$current_ref" "$dirty" "$meta" "$cli" "$ab" "$lc" "$tmux_s" "$ts" "$review"
   else
     local candidate="keep"
     if is_cleanup_candidate "$current_path"; then
@@ -243,7 +302,7 @@ if "$status_mode"; then
     echo "(no worktrees)"
   else
     first=true
-    while IFS=$'\x1f' read -r ts path ref dirty meta cli ab lc tmux_s; do
+    while IFS=$'\x1f' read -r ts path ref dirty meta cli ab lc tmux_s review; do
       $first || echo
       first=false
       marker=""
@@ -255,6 +314,7 @@ if "$status_mode"; then
       printf '  %-7s %s\n' "ref" "$ref"
       printf '  %-7s %s\n' "time" "$ts"
       printf '  %-7s %s   %s   %s\n' "status" "$dirty" "$meta_disp" "$ab"
+      [[ -n "$review" && "$review" != "-" ]] && printf '  %-7s %s\n' "review" "$review"
       printf '  %-7s %s\n' "commit" "$lc"
       printf '  %-7s %s\n' "tmux" "$tmux_s"
       printf '  %-7s %s\n' "path" "$path"
