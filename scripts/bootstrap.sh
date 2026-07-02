@@ -151,14 +151,20 @@ link_tree_files "bin"
 
 run chmod 700 "${HOME}/.config" "${HOME}/.claude" "${HOME}/bin"
 run chmod 755 "${HOME}"/bin/agent-* "${HOME}"/.claude/hooks/*.sh
+run chmod 755 "${HOME}"/.config/agents/bin/agent-review "${HOME}"/.config/agents/hooks/*
+run ln -sfn "${HOME}/.config/agents/bin/agent-review" "${HOME}/bin/agent-review"
 
 # Codex compatibility symlinks.
-run mkdir -p "${HOME}/.codex/bin"
+run mkdir -p "${HOME}/.codex/bin" "${HOME}/.codex/rules"
 backup_existing "${HOME}/.codex/AGENTS.md"
 run ln -sfn "${HOME}/.config/agents/AGENTS.md" "${HOME}/.codex/AGENTS.md"
 run ln -sfn "${HOME}/bin/agent-worktree" "${HOME}/.codex/bin/codex-worktree"
 run ln -sfn "${HOME}/bin/agent-worktrees" "${HOME}/.codex/bin/codex-worktrees"
 run ln -sfn "${HOME}/bin/agent-tmp" "${HOME}/.codex/bin/codex-tmp"
+backup_existing "${HOME}/.codex/hooks.json"
+backup_existing "${HOME}/.codex/rules/default.rules"
+run ln -sfn "${home_root}/.codex/hooks.json" "${HOME}/.codex/hooks.json"
+run ln -sfn "${home_root}/.codex/rules/default.rules" "${HOME}/.codex/rules/default.rules"
 
 # tmux framework: use upstream checkout, keep local overrides in this repo.
 if [[ ! -d "${HOME}/.config/oh-my-tmux/.git" ]]; then

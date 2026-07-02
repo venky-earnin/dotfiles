@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # agent-dashboard — open a tmux session with cross-agent visibility:
-#   top-left:  agent-worktrees --status (refreshes every 15s)
+#   top-left:  agent-worktrees --status (repo mode refreshes every 15s; scan mode every 60s)
 #   top-right: live `tail -F` of all per-repo INBOX.md under ~/.config/agents/inbox
-#   bottom:    tmux list-sessions (refreshes every 5s)
+#   bottom:    active review ledgers + tmux list-sessions (refreshes every 5s)
+#   window 2:  abtop, when installed
 #
 # Run from anywhere. Optional first arg: a single repo path to focus the
 # INBOX tail and worktree status on. Default: scan ~/Coding.
@@ -15,9 +16,12 @@ usage: agent-dashboard [scan-root]
 
 Opens (or attaches to) a tmux session named `agents-dashboard` with three
 live panes:
-  - top-left:  agent-worktrees --status (refreshes every 15s)
+  - top-left:  agent-worktrees --status (repo mode refreshes every 15s; scan mode every 60s)
   - top-right: tail -F of all per-repo INBOX.md under ~/.config/agents/inbox
-  - bottom:    tmux list-sessions (refreshes every 5s)
+  - bottom:    active review ledgers + tmux list-sessions (refreshes every 5s)
+
+If `abtop` is installed, an extra `abtop` window is added for live
+Claude/Codex session monitoring.
 
 scan-root defaults to ~/Coding.
 EOF
@@ -32,6 +36,10 @@ esac
 
 SESSION="agents-dashboard"
 SCAN_ROOT="${1:-$HOME/Coding}"
+SCAN_ROOT="${SCAN_ROOT/#\~/$HOME}"
+REPO_REFRESH_INTERVAL="${AGENT_DASHBOARD_REPO_INTERVAL:-15}"
+SCAN_REFRESH_INTERVAL="${AGENT_DASHBOARD_SCAN_INTERVAL:-60}"
+BOTTOM_REFRESH_INTERVAL="${AGENT_DASHBOARD_BOTTOM_INTERVAL:-5}"
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   if [[ -n "${TMUX:-}" ]]; then
@@ -42,10 +50,28 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   exit 0
 fi
 
-if [[ -d "$SCAN_ROOT/.git" ]]; then
-  worktrees_cmd="cd '$SCAN_ROOT' && while true; do clear; date -u; echo; agent-worktrees --status; sleep 15; done"
+if repo_root="$(git -C "$SCAN_ROOT" rev-parse --show-toplevel 2>/dev/null)"; then
+  repo_root_q="$(printf '%q' "$repo_root")"
+  worktrees_cmd="cd $repo_root_q && while true; do clear; date -u; echo; agent-worktrees --status; echo; echo '=== review ledgers ==='; agent-review status --current --compact 2>/dev/null || true; sleep $REPO_REFRESH_INTERVAL; done"
 else
-  worktrees_cmd="while true; do clear; date -u; echo '(workspaces under $SCAN_ROOT)'; for d in $SCAN_ROOT/*/*/; do [[ -d \"\$d/.git\" ]] || continue; printf '\\n=== %s ===\\n' \"\$(basename \$d)\"; (cd \"\$d\" && agent-worktrees --status 2>/dev/null | head -6); done; sleep 15; done"
+  scan_root_q="$(printf '%q' "$SCAN_ROOT")"
+  scan_interval_q="$(printf '%q' "$SCAN_REFRESH_INTERVAL")"
+  worktrees_cmd=$(
+    cat <<EOF
+SCAN_ROOT=$scan_root_q SCAN_REFRESH_INTERVAL=$scan_interval_q bash -lc 'while true; do
+  clear
+  date -u
+  echo "(workspaces under \$SCAN_ROOT)"
+  find "\$SCAN_ROOT" -maxdepth 5 -type d -name .git -prune 2>/dev/null | sort | while IFS= read -r gitdir; do
+    repo="\${gitdir%/.git}"
+    case "\$repo" in */.worktrees/*) continue ;; esac
+    printf "\\n=== %s ===\\n" "\$(basename "\$repo")"
+    (cd "\$repo" && { agent-worktrees --status 2>/dev/null | head -8; agent-review status --current --compact 2>/dev/null | sed "s/^/review  /" | head -5; })
+  done
+  sleep "\$SCAN_REFRESH_INTERVAL"
+done'
+EOF
+  )
 fi
 
 # Collect candidate INBOX.md paths from the shared per-repo store.
@@ -59,13 +85,17 @@ else
   inbox_cmd="tail -F $inbox_glob"
 fi
 
-sessions_cmd='while true; do clear; date -u; echo; tmux list-sessions -F "#{session_name}  (#{session_attached} attached) #{?session_grouped,grouped,}" 2>/dev/null; echo; echo "=== agents-dashboard windows ==="; tmux list-windows -t '"$SESSION"' 2>/dev/null; sleep 5; done'
+sessions_cmd='while true; do clear; date -u; echo "=== active review ledgers ==="; agent-review status --all --compact 2>/dev/null | grep -Ev "^reviewed_no_blockers blockers=0|^closed |^published " || echo "(none)"; echo; echo "=== tmux sessions ==="; tmux list-sessions -F "#{session_name}  (#{session_attached} attached) #{?session_grouped,grouped,}" 2>/dev/null; echo; echo "=== agents-dashboard windows ==="; tmux list-windows -t '"$SESSION"' 2>/dev/null; sleep '"$BOTTOM_REFRESH_INTERVAL"'; done'
 
 tmux new-session -d -s "$SESSION" -n status -x 220 -y 50 "$worktrees_cmd"
 tmux split-window -h -t "$SESSION:status" "$inbox_cmd"
 tmux split-window -v -t "$SESSION:status.0" "$sessions_cmd"
 tmux select-layout -t "$SESSION:status" main-vertical
 tmux setw -t "$SESSION:status" main-pane-width 130
+
+if command -v abtop >/dev/null 2>&1; then
+  tmux new-window -d -t "$SESSION" -n abtop "abtop"
+fi
 
 if [[ -n "${TMUX:-}" ]]; then
   tmux switch-client -t "$SESSION"

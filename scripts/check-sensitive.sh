@@ -6,7 +6,7 @@ cd "$repo_root"
 
 fail=false
 
-forbidden_paths='(^|/)(\.ssh|\.aws|\.gnupg|\.kube|\.databricks|\.docker|\.mcp-auth|\.npmrc|\.pypirc|\.netrc|\.databrickscfg|pip\.conf|\.zsh_history|\.bash_history|\.python_history|\.lesshst|audit\.log|LEARNINGS\.md|INBOX\.md)(/|$)'
+forbidden_paths='(^|/)(\.ssh|\.aws|\.gnupg|\.kube|\.databricks|\.docker|\.mcp-auth|\.npmrc|\.pypirc|\.netrc|\.databrickscfg|pip\.conf|\.zsh_history|\.bash_history|\.python_history|\.lesshst|audit\.log|LEARNINGS\.md|INBOX\.md|\.agent-session\.json)(/|$)|^home/\.config/agents/(inbox|logs|reviews)(/|$)|^home/\.codex/(auth\.json|history\.jsonl|log|sessions|memories)(/|$)'
 
 if git ls-files --others --cached --exclude-standard | grep -E "$forbidden_paths" >/tmp/dotfiles-forbidden-paths.$$; then
   echo "forbidden paths found:" >&2

@@ -1,0 +1,16 @@
+# Public-safe default Codex command rules for the local agent harness.
+# Keep publish-sensitive operations prompt-gated; add machine/project-specific
+# allow rules locally rather than committing them to this public dotfiles repo.
+prefix_rule(pattern=["git", "push"], decision="prompt", justification="Require explicit approval before publishing local commits.")
+prefix_rule(pattern=["git", "merge"], decision="prompt", justification="Require explicit approval before merging branches.")
+prefix_rule(pattern=["gh", "pr", "create"], decision="prompt", justification="Require explicit approval before creating a PR.")
+prefix_rule(pattern=["gh", "pr", "edit"], decision="prompt", justification="Require explicit approval before mutating PR metadata.")
+prefix_rule(pattern=["gh", "pr", "merge"], decision="prompt", justification="Humans merge by default; require explicit approval.")
+prefix_rule(pattern=["gh", "pr", "ready"], decision="prompt", justification="Require explicit approval before marking a PR ready.")
+prefix_rule(pattern=["gh", "pr", "close"], decision="prompt", justification="Require explicit approval before closing a PR.")
+prefix_rule(pattern=["gh", "pr", "comment"], decision="prompt", justification="Require explicit approval before posting PR comments.")
+prefix_rule(pattern=["gh", "pr", "view"], decision="allow")
+prefix_rule(pattern=["gh", "api", "-X", "POST"], decision="prompt", justification="Require explicit approval before GitHub API writes.")
+prefix_rule(pattern=["gh", "api", "-X", "PUT"], decision="prompt", justification="Require explicit approval before GitHub API writes.")
+prefix_rule(pattern=["gh", "api", "-X", "PATCH"], decision="prompt", justification="Require explicit approval before GitHub API writes.")
+prefix_rule(pattern=["gh", "api", "-X", "DELETE"], decision="prompt", justification="Require explicit approval before GitHub API writes.")

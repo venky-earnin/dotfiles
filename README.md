@@ -9,8 +9,10 @@ This repo is allowlist-based. It intentionally excludes auth material, histories
 
 - `home/` mirrors files that can be linked into `$HOME`.
 - `home/bin/` contains reusable helper scripts such as `agent-worktree`, `agent-inbox`, and `agent-recall`.
-- `home/.config/agents/AGENTS.md` is the shared agent behavior file imported by Codex and Claude.
+- `home/.config/agents/` contains the shared agent behavior file, collaboration
+  workflow docs, `agent-review` ledger tool, shared hooks, and lightweight tests.
 - `home/.claude/` contains Claude-specific commands, hooks, and settings.
+- `home/.codex/` contains public-safe Codex hook and command-rule defaults.
 - `scripts/bootstrap.sh` links the curated files into a machine.
 - `scripts/check.sh` runs syntax, whitespace, sensitive-content, and dry-run checks.
 - `scripts/smoke-clean-home.sh` bootstraps into a temporary `$HOME` to verify
@@ -107,8 +109,12 @@ checks on push and pull request.
 - Workflow extras: `hyperfine`, `glow`, `gum`, `just`, `sesh`, `tldr`, `rtk`,
   `terminal-notifier`, and `watch`.
 - Agent workflow helpers: shared `AGENTS.md`, Codex/Claude compatibility
-  symlinks, and `agent-worktree`, `agent-inbox`, `agent-recall`, and
-  `agent-tmp`.
+  symlinks, `agent-worktree`, `agent-inbox`, `agent-recall`, `agent-tmp`, and
+  the `agent-review` local review ledger.
+- Agent hardening defaults: Claude and Codex hook wiring, a publish guard for
+  push/PR/merge operations, shared review-state reminders, recall-on-error, and
+  public-safe Codex rules that prompt before publishing while leaving
+  machine-specific allow rules out of the repo.
 
 ## Local Private Config
 
@@ -132,7 +138,8 @@ cp examples/gitconfig-work.example ~/.gitconfig-work
 - SSH, AWS, Databricks, Docker, Kubernetes, npm, pip, and package registry credentials.
 - Shell histories and editor histories.
 - Claude/Codex sessions, logs, caches, memories, and per-project state.
-- Agent inboxes and durable learnings, which can contain project-specific context.
+- Agent review ledgers, inboxes, event logs, and durable learnings, which can
+  contain project-specific context.
 - Vendored plugin clones such as Oh My Zsh, oh-my-tmux, and fzf-tab.
 
 Run `./scripts/check-sensitive.sh` before every push.

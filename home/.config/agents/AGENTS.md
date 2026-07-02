@@ -68,24 +68,33 @@ experiments.
 ## Parallel task workflow
 
 For parallel task work, keep the operating model simple: one task maps to one
-tmux session, one agent instance, and one dedicated git worktree. The user's
-shell has these convenience functions:
+tmux window or session, one agent instance, and one dedicated git worktree.
 
-- `agent-task --cli {codex|claude} <type/slug>` — generic launcher
-- `codex-task <type/slug>` / `claude-task <type/slug>` — long-form symmetric names
-- `cx <type/slug>` — launch a Codex session in a worktree+tmux
-- `cl <type/slug>` — launch a Claude Code session in a worktree+tmux
+The user's normal flow is manual: enter a repo with `z <repo>`, open or choose a
+tmux window, then start the agent directly:
 
-Session names tag the CLI (`cx-<repo>-<type>-<slug>` vs
-`cl-<repo>-<type>-<slug>`) so a Codex and Claude agent can work on the same
-task in parallel without tmux collisions. The `cl` shortcut was chosen over
-`cc` because `/usr/bin/cc` is the C compiler.
+    claude --dangerously-skip-permissions
+    codex --sandbox danger-full-access --dangerously-bypass-approvals-and-sandbox
+
+Use the low-level helpers when they are useful, but do not assume shell launcher
+shortcuts exist:
+
+- `agent-worktree <type/slug> [base-ref]` — create the dedicated worktree
+- `agent-worktrees --status` — inspect worktrees and active tmux owners
+- `agent-attach --cli {codex|claude}` — attach an agent to an existing worktree
 
 Do not introduce extra task launcher abstractions unless the user explicitly
 asks for one. If the user starts in a general session and then chooses a task,
-explain the manual flow: create or choose the dedicated worktree, open a new
-tmux session or WezTerm tab for that worktree, start the agent there, and
-report the session name plus worktree path and branch.
+create or choose the dedicated worktree, report the worktree path and branch,
+and continue there unless the user asks for a manual handoff.
+
+For local CLI collaboration, use the shared `<repo>/.worktrees/` layout and
+`agent-worktree` helper so `agent-worktrees --status`, INBOX, review ledgers,
+and the dashboard see the same work. Codex-app native worktrees are acceptable
+for Codex-app-only experiments, but before cross-agent review the work must be
+available in the shared worktree layout or explicitly registered in the review
+ledger. `agent-worktree` defaults its base ref to the current `HEAD`; pass an
+explicit base ref when deterministic ancestry matters.
 
 ## Session orientation — survey before starting work
 
@@ -169,6 +178,11 @@ with `.agent-session.json` metadata. Do not leave anonymous scratch
 directories like `/tmp/foo`, `/tmp/test`, or `/tmp/efm-run` when the work
 relates to a repository task.
 
+`.agent-session.json` is canonical for new worktree and scratch metadata.
+Shared helpers write only `.agent-session.json`. They may read old
+`.codex-session.json` files for compatibility with older worktrees, but new
+workflows must not require that file.
+
 ## Cross-agent status (shared INBOX)
 
 The INBOX is a single per-repo log shared across the base checkout and **all
@@ -207,6 +221,148 @@ within a single phase — the goal is informative, not noisy.
 **Never write** secrets, tokens, raw sensitive command output, customer
 data, or personal info. Treat the INBOX as if it could be read by anyone with
 shell access.
+
+## Local pre-PR review workflow
+
+Use `agent-review` for local implement -> review -> address -> re-review cycles
+before a branch is pushed or a PR exists. Manual ledger edits are a fallback
+only when `agent-review` is unavailable or cannot represent the state.
+Full rationale, journeys, and review-history details live in
+`~/.config/agents/COLLABORATION.md`; this section is the executable cold-start
+contract agents must follow.
+
+The review ledger is the source of truth for cross-agent coordination:
+
+    ~/.config/agents/reviews/<repo>/<task-key>/task.json
+
+`agent-review` appends mutating workflow events to:
+
+    ~/.config/agents/logs/agent-review-events.jsonl
+
+Use that log to audit whether agents actually used the workflow; do not infer
+adherence from chat history alone. Codex lifecycle hooks must also be trusted in
+the interactive `/hooks` UI after any hook command changes, because untrusted
+Codex hooks are skipped. The hardening rationale and before-vs-now design record
+lives in `~/.config/agents/AGENT_HARNESS_HARDENING_DESIGN.md`.
+
+For tracked repository code, normal snapshots are SHA-only: commit or amend the
+implementation first, then snapshot `HEAD`. Do not copy a whole worktree or
+tracked files for review. Dirty tracked files block review by default; use any
+dirty-copy escape hatch only when explicitly requested and record why.
+
+For ignored, untracked, or non-git artifacts, pass explicit `--artifact` or
+`--artifact-dir` paths. The helper stores content by checksum and reuses
+previously copied blobs, so repeated review cycles should not recopy identical
+artifacts. For non-git roots, pass an explicit `--repo <namespace>` such as
+`--repo agents-config`; do not rely on directory basename guessing.
+
+Implementer default flow:
+
+    agent-review resolve "<feature title or type/slug>" || true
+    agent-worktree <type/slug> [base-ref]   # for substantive repo edits, if not already in the owner worktree
+    agent-review init --title "<feature title>" --type-slug <type/slug>
+    agent-review snapshot --verify "<project gate>"
+    agent-review request --reviewer <other-cli>
+
+Always try `agent-review resolve "<task>"` before `init`. If it returns exactly
+one ledger, resume that ledger instead of creating a new one. If it returns
+multiple ledgers, stop and ask the developer which one is authoritative. Only
+run `init` when no existing ledger matches the feature. In Claude sessions,
+pass `--owner-cli claude` if `AGENT_CLI` is not set; in Codex sessions, pass
+`--owner-cli codex` or rely on the Codex default.
+
+For repository edits, create or reuse the dedicated owner worktree before
+initializing the review ledger. Non-git/config namespaces such as
+`agents-config` may use an explicit `--repo <namespace>` ledger without a git
+worktree.
+
+The review request posts an INBOX pointer when a repo/namespace supports
+`agent-inbox`; otherwise the request is discoverable through `task.json` and
+`agent-review status`. The human normally opens or prompts the other CLI to
+review; `request` records state but does not spawn a reviewer agent.
+
+Reviewer default flow:
+
+    agent-review resolve "<feature title or type/slug>"
+    # If latest_review_path already reviews latest_snapshot_id, do not duplicate it.
+    # Otherwise write findings under the ledger reviews/ dir, then record them:
+    agent-review post --reviewer <cli> --snapshot latest --blockers <N> --file <review.md>
+
+Reviewers are read-only for implementation files unless the user explicitly
+asks them to edit. Reviewers write findings through `agent-review post`; they
+do not hand-edit `task.json`.
+
+Reviewers must review a stable target, not the live mutable tree:
+
+- Git code snapshots: use `git show <snapshot-sha>`, `git diff <base>..<sha>`,
+  or a detached read-only checkout at the snapshot SHA.
+- Artifact snapshots: read the copied artifact recorded in the ledger's
+  `artifacts.json` / `checksums.sha256`.
+- Avoid `git diff <sha>` against a live working tree; it drifts as the
+  implementer edits.
+
+Before writing a review, inspect `task.json.latest_snapshot_id` and
+`task.json.latest_review_path`. If the latest review file already covers the
+latest snapshot id, report that no new review is needed instead of creating a
+duplicate. Review files should live under:
+
+    ~/.config/agents/reviews/<repo>/<task-key>/reviews/
+
+Use the canonical filename shape when writing directly into the ledger:
+
+    rNNN-<snapshot-id>-<reviewer>-<YYYYMMDDTHHMMSSZ>.md
+
+Include this header near the top so `agent-review addressed` and staleness checks
+can parse it:
+
+    **Reviewed snapshot:** `<snapshot-id>`
+
+If a reviewer already wrote the canonical review file under the ledger's
+`reviews/` directory, the owner records it with the same `agent-review post
+--file <path>` command; the helper adopts the file in place rather than creating
+a duplicate review.
+
+Address-and-rereview flow:
+
+    agent-review snapshot --verify "<project gate>"
+    agent-review addressed --review rNNN --file <resolution.md>
+    agent-review request --reviewer <same-or-other-cli>
+
+Resolve `rNNN` from `task.json.latest_review_path` or by listing the ledger's
+`reviews/` directory. Do not guess a review number from chat history.
+
+On resume or in a fresh session, start with `agent-review resolve "<task>"` or
+`agent-review status --current --compact`, then report the ledger path, latest
+snapshot, review state, blocker count, owner worktree, and next action.
+
+Choose `--verify` from the repo's own `AGENTS.md`, README, Makefile, or test
+docs. If no repo-specific gate exists, run the smallest relevant deterministic
+test/lint/syntax check and record it. If verification cannot run, request review
+only with an explicit `--request-anyway --reason <why>` and mention the gap.
+
+## Human review and merge policy
+
+Agent-authored inline PR review comments must be prefixed with
+`[claude-review]` or `[codex-review]`. GitHub author identity is useful, but the
+prefix keeps provenance intact when comments are summarized, copied, or bridged
+through another tool.
+
+Humans merge by default. Agents must not merge PRs unless the developer
+explicitly authorizes that exact PR and merge method after review is clean.
+Publishing actions (`git push`, `gh pr create`, `gh pr merge`, PR mutation via
+`gh api`, and similar) are permission-gated in Claude/Codex config and should
+prompt even if the model thinks the prose allows them. Claude uses a
+`PreToolUse(Bash)` publish guard plus `permissions.ask`; Codex uses execpolicy
+rules plus the normal approval flow.
+
+For important changes, prefer cross-CLI review: Claude reviews Codex-owned work
+and Codex reviews Claude-owned work. The developer or coordinator can override
+per task; trivial or read-only work may skip a second model review when the user
+accepts that.
+
+Do not build or use a PR handoff automation command by default. Local review is
+handled by `agent-review`, and publication/merge actions still require explicit
+developer approval.
 
 ## Git hygiene — branches, commits, PRs
 

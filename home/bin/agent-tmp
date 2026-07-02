@@ -95,9 +95,4 @@ cat >"${scratch_path}/.agent-session.json" <<JSON
 }
 JSON
 
-# Back-compat: also write .codex-session.json for codex owner
-if [[ "$cli" == "codex" ]]; then
-  cp "${scratch_path}/.agent-session.json" "${scratch_path}/.codex-session.json"
-fi
-
 echo "$scratch_path"
