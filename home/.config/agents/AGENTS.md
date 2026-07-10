@@ -347,13 +347,12 @@ Agent-authored inline PR review comments must be prefixed with
 prefix keeps provenance intact when comments are summarized, copied, or bridged
 through another tool.
 
-Humans merge by default. Agents must not merge PRs unless the developer
-explicitly authorizes that exact PR and merge method after review is clean.
-Publishing actions (`git push`, `gh pr create`, `gh pr merge`, PR mutation via
-`gh api`, and similar) are permission-gated in Claude/Codex config and should
-prompt even if the model thinks the prose allows them. Claude uses a
-`PreToolUse(Bash)` publish guard plus `permissions.ask`; Codex uses execpolicy
-rules plus the normal approval flow.
+Humans merge by default. Agents may merge only when merging the identified PR
+is within the user's request and review is clean. Git and GitHub commands are
+not client permission-gated: when pushing, opening or updating a PR, commenting,
+or merging is already within the requested workflow, execute it without asking
+for a second approval. This does not broaden the task's authorization or permit
+an unrelated remote action.
 
 For important changes, prefer cross-CLI review: Claude reviews Codex-owned work
 and Codex reviews Claude-owned work. The developer or coordinator can override
@@ -361,8 +360,8 @@ per task; trivial or read-only work may skip a second model review when the user
 accepts that.
 
 Do not build or use a PR handoff automation command by default. Local review is
-handled by `agent-review`, and publication/merge actions still require explicit
-developer approval.
+handled by `agent-review`; in-scope publication and merge actions do not require
+a redundant confirmation.
 
 ## Git hygiene — branches, commits, PRs
 

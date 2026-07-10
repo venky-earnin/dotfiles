@@ -109,11 +109,11 @@ Slug creation must be shared, deterministic, and CLI-agnostic; do not rely on a
 model-specific slugger. Ask the developer only when the match or slug is
 genuinely ambiguous.
 
-The default mode is **collaboration workflow, local-only, no push**. The
-developer may say `Use the collaboration workflow` or `Do not push yet` for
-emphasis, but agents must behave that way by default for substantive feature
-work. Pushing, draft PR creation, deployment, live jobs, or any other remote
-side effect requires explicit developer approval.
+The default mode is **collaboration workflow, local-only, no push** unless the
+developer's request includes publication. Git and GitHub actions that are
+already within the requested workflow do not require a second confirmation.
+Deployment, live jobs, or other non-Git remote side effects still require
+explicit developer approval.
 
 The default review mode is **read-only**. The developer may say
 `Do not edit implementation files` for emphasis, but reviewer agents must behave

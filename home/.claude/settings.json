@@ -11,20 +11,6 @@
       "Bash(cp -r tools /tmp/staging-check/upload/tools)",
       "Bash(aws s3 *)"
     ],
-    "ask": [
-      "Bash(git push:*)",
-      "Bash(git merge:*)",
-      "Bash(gh pr create:*)",
-      "Bash(gh pr merge:*)",
-      "Bash(gh pr ready:*)",
-      "Bash(gh pr close:*)",
-      "Bash(gh pr edit:*)",
-      "Bash(gh pr comment:*)",
-      "Bash(gh api -X POST:*)",
-      "Bash(gh api -X PUT:*)",
-      "Bash(gh api -X PATCH:*)",
-      "Bash(gh api -X DELETE:*)"
-    ],
     "defaultMode": "auto"
   },
   "model": "opus[1m]",
@@ -35,15 +21,6 @@
           {
             "type": "command",
             "command": "$HOME/.claude/hooks/audit-log.sh"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.config/agents/hooks/publish-guard.py"
           }
         ]
       }

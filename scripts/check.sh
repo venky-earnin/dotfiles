@@ -25,7 +25,6 @@ done
 echo "==> python syntax"
 python3 -m py_compile \
   home/.config/agents/bin/agent-review \
-  home/.config/agents/hooks/publish-guard.py \
   home/.config/agents/tests/test_agent_hooks.py \
   home/.config/agents/tests/test_agent_review.py
 

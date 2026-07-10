@@ -84,9 +84,6 @@ The following hooks are configured in `~/.claude/settings.json`:
 - `PreToolUse` → `~/.claude/hooks/audit-log.sh` — append-only audit log of
   tool invocations at `~/.claude/audit.log`. Useful for "what did the agent do
   at 3am" forensics.
-- `PreToolUse(Bash)` → `~/.config/agents/hooks/publish-guard.py` — forces an
-  approval prompt for publish-sensitive commands such as `git push`,
-  `git merge`, `gh pr create/merge/edit`, and write-style `gh api`.
 - `PostToolUse(Bash)` → `~/.config/agents/hooks/recall-on-error.sh` — when a command
   fails with a real error signature, search durable learnings and inject
   matching hints back into context.
@@ -94,7 +91,7 @@ The following hooks are configured in `~/.claude/settings.json`:
   compact worktree, INBOX, and review-ledger context when a session starts in a
   supported repo or the shared agent config namespace.
 - `Notification` → `~/.claude/hooks/notify.sh` — parity with Codex's notify
-  config for permission prompts and waiting-for-input events.
+  config for waiting-for-input events.
 
 ### End-of-turn etiquette
 
