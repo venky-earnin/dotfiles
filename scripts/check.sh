@@ -18,7 +18,7 @@ else
 fi
 
 echo "==> shell syntax"
-for file in scripts/*.sh home/bin/agent-* home/.claude/hooks/*.sh home/.config/agents/hooks/*.sh; do
+for file in scripts/*.sh home/.local/bin/* home/bin/agent-* home/.claude/hooks/*.sh home/.config/agents/hooks/*.sh; do
   bash -n "$file"
 done
 
@@ -35,14 +35,14 @@ done
 
 if command -v shellcheck >/dev/null 2>&1; then
   echo "==> shellcheck"
-  shellcheck scripts/*.sh home/bin/agent-* home/.claude/hooks/*.sh home/.config/agents/hooks/*.sh
+  shellcheck scripts/*.sh home/.local/bin/* home/bin/agent-* home/.claude/hooks/*.sh home/.config/agents/hooks/*.sh
 else
   echo "==> shellcheck skipped: not installed"
 fi
 
 if command -v shfmt >/dev/null 2>&1; then
   echo "==> shfmt"
-  shfmt -i 2 -ci -d scripts/*.sh home/bin/agent-* home/.claude/hooks/*.sh home/.config/agents/hooks/*.sh
+  shfmt -i 2 -ci -d scripts/*.sh home/.local/bin/* home/bin/agent-* home/.claude/hooks/*.sh home/.config/agents/hooks/*.sh
 else
   echo "==> shfmt skipped: not installed"
 fi

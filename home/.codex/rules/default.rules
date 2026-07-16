@@ -1,6 +1,11 @@
 # Public-safe default Codex command rules for the local agent harness.
 # Git and GitHub operations run without a second client permission prompt when
 # they are within the scope of the user's request.
+prefix_rule(pattern=["/bin/rm"], decision="forbidden")
+prefix_rule(pattern=["/usr/bin/rm"], decision="forbidden")
+prefix_rule(pattern=["command", "rm"], decision="forbidden")
+prefix_rule(pattern=["env", "rm"], decision="forbidden")
+prefix_rule(pattern=["xargs", "rm"], decision="forbidden")
 prefix_rule(pattern=["git", "push"], decision="allow")
 prefix_rule(pattern=["git", "merge"], decision="allow")
 prefix_rule(pattern=["gh", "pr", "create"], decision="allow")

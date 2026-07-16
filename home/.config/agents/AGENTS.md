@@ -20,6 +20,23 @@ matters or for simple inspection commands such as `sed`, `rg`, `ls`, `git
 status`. Claude users: prefer Read/Edit over `cat`/`sed`; pipe noisy commands
 to a file and grep the file instead of dumping into context.
 
+## Recoverable local deletion
+
+Local deletion on this Mac must be recoverable by default. `~/.local/bin/rm`
+shadows the system binary and translates common `rm`, `rm -r`, and `rm -rf`
+usage to macOS `/usr/bin/trash`.
+
+- For local paths, use `trash` directly or the normal `rm` shim. Never bypass
+  it with `/bin/rm`, `/usr/bin/rm`, `command rm`, `env rm`, `xargs rm`,
+  `find -delete`, `unlink`, or a language-level permanent-delete API.
+- The shim must fail loudly when Trash is unavailable, an option cannot be
+  translated safely, or the target resolves to `/`, the home directory, or the
+  current working directory. Do not add a `real-rm` escape hatch.
+- A permanent delete on a remote host, container, object store, or other system
+  without a Trash is allowed only when the user explicitly requested deletion
+  and the exact target has been verified. This exception never applies to an
+  accidental local cleanup.
+
 ## SSM / remote-job polling — never loop SSM sessions
 
 SSM Session Manager sessions are flaky and hang. **Never run a polling loop

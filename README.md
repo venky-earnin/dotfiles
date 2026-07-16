@@ -13,6 +13,8 @@ This repo is allowlist-based. It intentionally excludes auth material, histories
   workflow docs, `agent-review` ledger tool, shared hooks, and lightweight tests.
 - `home/.claude/` contains Claude-specific commands, hooks, and settings.
 - `home/.codex/` contains public-safe Codex hook and command-rule defaults.
+- `home/.local/bin/rm` makes local shell deletion recoverable through macOS
+  Trash, including common `rm -rf` calls from coding agents.
 - `scripts/bootstrap.sh` links the curated files into a machine.
 - `scripts/check.sh` runs syntax, whitespace, sensitive-content, and dry-run checks.
 - `scripts/smoke-clean-home.sh` bootstraps into a temporary `$HOME` to verify
@@ -111,10 +113,10 @@ checks on push and pull request.
 - Agent workflow helpers: shared `AGENTS.md`, Codex/Claude compatibility
   symlinks, `agent-worktree`, `agent-inbox`, `agent-recall`, `agent-tmp`, and
   the `agent-review` local review ledger.
-- Agent hardening defaults: Claude and Codex hook wiring, a publish guard for
-  push/PR/merge operations, shared review-state reminders, recall-on-error, and
-  public-safe Codex rules that prompt before publishing while leaving
-  machine-specific allow rules out of the repo.
+- Agent hardening defaults: a recoverable local `rm` shim, absolute-system-`rm`
+  deny rules, Claude and Codex hook wiring, shared review-state reminders,
+  recall-on-error, and public-safe Codex command rules. In-scope Git/GitHub
+  operations do not require a redundant client approval prompt.
 
 ### Agent plugin compatibility
 

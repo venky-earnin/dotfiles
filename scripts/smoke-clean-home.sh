@@ -35,6 +35,7 @@ require_file() {
 }
 
 require_link ".zshrc"
+require_link ".profile"
 require_link ".gitconfig"
 require_link ".tmux.conf"
 require_link ".tmux.conf.local"
@@ -47,6 +48,7 @@ require_link ".claude/CLAUDE.md"
 require_link ".codex/AGENTS.md"
 require_link ".codex/hooks.json"
 require_link ".codex/rules/default.rules"
+require_link ".local/bin/rm"
 require_link "bin/agent-review"
 require_link "bin/agent-worktree"
 require_link "bin/agent-inbox"
@@ -54,5 +56,9 @@ require_file ".config/zsh/private.zsh"
 
 echo "==> linked shell syntax"
 HOME="$tmp_home" zsh -n "$tmp_home/.zshrc"
+
+echo "==> recoverable rm precedence"
+HOME="$tmp_home" zsh -lc '[[ "$(command -v rm)" == "$HOME/.local/bin/rm" ]]'
+HOME="$tmp_home" bash -lc '[[ "$(command -v rm)" == "$HOME/.local/bin/rm" ]]'
 
 echo "clean-home smoke test passed"

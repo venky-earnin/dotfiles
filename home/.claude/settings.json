@@ -5,11 +5,17 @@
   "permissions": {
     "allow": [
       "Bash(mkdir -p /tmp/staging-check)",
-      "Bash(rm -rf /tmp/staging-check/*)",
       "Bash(mkdir -p /tmp/staging-check/upload)",
       "Bash(cp -r code /tmp/staging-check/upload/code)",
       "Bash(cp -r tools /tmp/staging-check/upload/tools)",
       "Bash(aws s3 *)"
+    ],
+    "deny": [
+      "Bash(/bin/rm *)",
+      "Bash(/usr/bin/rm *)",
+      "Bash(command rm *)",
+      "Bash(env rm *)",
+      "Bash(xargs rm *)"
     ],
     "defaultMode": "auto"
   },

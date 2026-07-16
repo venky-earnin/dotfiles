@@ -16,6 +16,7 @@ HOOK_DIR = REAL_HOME / ".config" / "agents" / "hooks"
 SESSION_HOOK = HOOK_DIR / "session-start-context.sh"
 RECALL_HOOK = HOOK_DIR / "recall-on-error.sh"
 REMINDER_HOOK = HOOK_DIR / "review-state-reminder.sh"
+SAFE_RM = REAL_HOME / ".local" / "bin" / "rm"
 
 
 class AgentHookTests(unittest.TestCase):
@@ -40,6 +41,7 @@ class AgentHookTests(unittest.TestCase):
     def test_codex_and_claude_hook_config_are_valid_json(self) -> None:
         codex = json.loads((REAL_HOME / ".codex" / "hooks.json").read_text(encoding="utf-8"))
         claude = json.loads((REAL_HOME / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        codex_rules = (REAL_HOME / ".codex" / "rules" / "default.rules").read_text(encoding="utf-8")
 
         self.assertEqual(
             codex["hooks"]["SessionStart"][0]["hooks"][0]["command"],
@@ -52,6 +54,9 @@ class AgentHookTests(unittest.TestCase):
         self.assertEqual(len(claude["hooks"]["PreToolUse"]), 1)
         self.assertNotIn("ask", claude["permissions"])
         self.assertNotIn("publish-guard.py", json.dumps(claude))
+        self.assertNotIn("Bash(rm -rf", json.dumps(claude["permissions"]["allow"]))
+        self.assertIn("Bash(/bin/rm *)", claude["permissions"]["deny"])
+        self.assertIn('prefix_rule(pattern=["/bin/rm"], decision="forbidden")', codex_rules)
         self.assertEqual(
             codex["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
             "$HOME/.config/agents/hooks/recall-on-error.sh",
@@ -60,6 +65,31 @@ class AgentHookTests(unittest.TestCase):
             claude["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
             "$HOME/.config/agents/hooks/recall-on-error.sh",
         )
+
+    def test_safe_rm_accepts_force_recursive_for_a_missing_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing"
+            proc = subprocess.run(
+                [str(SAFE_RM), "-rf", str(missing)],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_safe_rm_refuses_the_current_working_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = subprocess.run(
+                [str(SAFE_RM), "-rf", "."],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("refusing protected path", proc.stderr)
+            self.assertTrue(Path(tmp).exists())
 
     def test_session_context_emits_valid_json_for_agents_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

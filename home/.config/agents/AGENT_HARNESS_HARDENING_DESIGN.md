@@ -17,12 +17,22 @@ corresponding Codex execpolicy rules now return `allow`. The historical sections
 below remain as a record of the earlier hardening design; this update supersedes
 their publish-gating policy.
 
+## July 16 Local Delete Safety Update
+
+Local `rm` now resolves through `~/.local/bin/rm`, which accepts common removal
+flags but moves targets with macOS `/usr/bin/trash`. The wrapper rejects unknown
+or interactive options, refuses `/`, the home directory, and the current
+working directory, and fails if Trash is unavailable. Shared agent instructions
+forbid permanent-delete bypasses; Claude deny rules and Codex execpolicy rules
+also forbid direct `/bin/rm` and `/usr/bin/rm` commands.
+
 ## Current State
 
 - The hardening ledger is `reviewed_no_blockers`.
 - Codex hook trust was verified by the developer through `/hooks` after the
   hardening pass.
 - Git/GitHub writes are not permission-gated in either client.
+- Local shell deletion is recoverable by default in both clients.
 
 ## Decision Summary
 
