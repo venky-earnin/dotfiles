@@ -113,6 +113,9 @@ checks on push and pull request.
 - Agent workflow helpers: shared `AGENTS.md`, Codex/Claude compatibility
   symlinks, `agent-worktree`, `agent-inbox`, `agent-recall`, `agent-tmp`, and
   the `agent-review` local review ledger.
+- Agent visibility: `ccusage` is included for token/cost reports. `abtop` is an
+  optional live Claude/Codex monitor; install it with `cargo install abtop`,
+  and `agent-dashboard` will open an `abtop` window when available.
 - Agent hardening defaults: a recoverable local `rm` shim, absolute-system-`rm`
   deny rules, Claude and Codex hook wiring, shared review-state reminders,
   recall-on-error, and public-safe Codex command rules. In-scope Git/GitHub

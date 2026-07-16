@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # agent-attach — launch a CLI inside an EXISTING worktree, no creation.
 #
-# Unlike `agent-worktree` (which creates) or `agent-task` (create-or-reattach),
-# this is a pure attach: it resolves a worktree by name/substring or via an
-# interactive picker, then opens (or reattaches) a tmux session in it with
-# the chosen CLI.
+# Unlike `agent-worktree`, this is a pure attach: it resolves a worktree by
+# name/substring or via an interactive picker, then opens or reattaches a tmux
+# session in it with the chosen CLI.
 #
 # Usage:
 #   agent-attach [--cli codex|claude|other] [<query>]
@@ -12,7 +11,7 @@
 # Behavior:
 #   no <query>       → interactive picker (fzf if available, else `select`)
 #   <query> matches  → direct attach (exact basename > substring match)
-#   <query> no match → error (suggests `cl`/`cx` to create instead)
+#   <query> no match → error (suggests `agent-worktree` to create instead)
 
 set -euo pipefail
 
@@ -27,7 +26,8 @@ CLI inside it (in a tmux session named <prefix>-<repo>-<wt-basename>).
   <query>         match by exact basename, then substring; slashes auto-
                   converted (feat/foo → feat-foo)
 
-This NEVER creates a worktree. Use `cl <slug>` / `cx <slug>` for that.
+This NEVER creates a worktree. Use `agent-worktree <type/slug> [base-ref]`
+first, then attach here if you want a managed tmux session.
 EOF
 }
 
@@ -115,7 +115,7 @@ for r in rows:
 
 if [[ -z "$lines" ]]; then
   echo "agent-attach: no worktrees for $repo_name" >&2
-  echo "hint: create one with \`cl <type/slug>\` or \`cx <type/slug>\`" >&2
+  echo "hint: create one with \`agent-worktree <type/slug>\`" >&2
   exit 1
 fi
 
@@ -130,7 +130,7 @@ if [[ -n "$query" ]]; then
   fi
   if [[ -z "$chosen" ]]; then
     echo "agent-attach: no worktree matches '$query'" >&2
-    echo "hint: try with no args for a picker, or create with \`cl $query\`" >&2
+    echo "hint: try with no args for a picker, or create with \`agent-worktree $query\`" >&2
     exit 1
   fi
 fi
@@ -195,6 +195,6 @@ fi
 
 case "$cli" in
   claude) exec tmux new-session -s "$session" -c "$path" "claude --dangerously-skip-permissions" ;;
-  codex) exec tmux new-session -s "$session" -c "$path" "codex --sandbox danger-full-access" ;;
+  codex) exec tmux new-session -s "$session" -c "$path" "codex --sandbox danger-full-access --dangerously-bypass-approvals-and-sandbox" ;;
   *) exec tmux new-session -s "$session" -c "$path" "$SHELL" ;;
 esac
