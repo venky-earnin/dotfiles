@@ -1,23 +1,38 @@
 # Agent Harness Hardening Design
 
-Status: implementation cross-CLI reviewed clean in
-`agents-config/chore-agent-harness-hardening` at snapshot
-`003-20260702T022048Z-local`; this document also records the developer's
-post-review Codex `/hooks` trust confirmation.
+Status: the July 2 hardening implementation was cross-CLI reviewed clean. Its
+Git/GitHub approval gates were intentionally removed by developer direction on
+July 10, 2026.
 
 This note documents the July 2026 hardening pass for the local Claude Code +
 Codex collaboration harness. It explains what changed, what the setup looked
 like before, and why the enforcement model is different for Codex and Claude.
+
+## July 10 Policy Update
+
+Git and GitHub commands no longer require a separate client approval prompt
+when they are within the scope of the developer's request. The Claude
+`publish-guard.py` hook and `permissions.ask` entries were removed, and the
+corresponding Codex execpolicy rules now return `allow`. The historical sections
+below remain as a record of the earlier hardening design; this update supersedes
+their publish-gating policy.
+
+## July 16 Local Delete Safety Update
+
+Local `rm` now resolves through `~/.local/bin/rm`, which accepts common removal
+flags but moves targets with macOS `/usr/bin/trash`. The wrapper rejects unknown
+or interactive options, refuses `/`, the home directory, and the current
+working directory, and fails if Trash is unavailable. Shared agent instructions
+forbid permanent-delete bypasses; Claude deny rules and Codex execpolicy rules
+also forbid direct `/bin/rm` and `/usr/bin/rm` commands.
 
 ## Current State
 
 - The hardening ledger is `reviewed_no_blockers`.
 - Codex hook trust was verified by the developer through `/hooks` after the
   hardening pass.
-- Claude's publish guard is implemented as a `PreToolUse(Bash)` hook and covered
-  by unit tests. A one-time live `git push --dry-run` prompt check remains a
-  developer-owned sanity check because the safe failure mode is to deny/abort at
-  the UI prompt.
+- Git/GitHub writes are not permission-gated in either client.
+- Local shell deletion is recoverable by default in both clients.
 
 ## Decision Summary
 
@@ -27,9 +42,8 @@ some permissive client rules. Now the split is deliberate:
 - Instruction files (`AGENTS.md`, `CLAUDE.md`) describe defaults and workflow.
 - `agent-review` owns local review state, snapshots, stale checks, and event
   logging.
-- Codex publish-sensitive commands are gated by execpolicy prompt rules.
-- Claude publish-sensitive commands are gated by a `PreToolUse(Bash)` hook, with
-  `permissions.ask` kept as defense in depth.
+- Codex Git/GitHub rules explicitly allow in-scope commands.
+- Claude has no Git/GitHub `permissions.ask` rules or publish guard hook.
 - Cross-agent adherence is audited from `agent-review-events.jsonl`, not inferred
   from chat history.
 

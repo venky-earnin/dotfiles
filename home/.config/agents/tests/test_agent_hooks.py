@@ -16,7 +16,7 @@ HOOK_DIR = REAL_HOME / ".config" / "agents" / "hooks"
 SESSION_HOOK = HOOK_DIR / "session-start-context.sh"
 RECALL_HOOK = HOOK_DIR / "recall-on-error.sh"
 REMINDER_HOOK = HOOK_DIR / "review-state-reminder.sh"
-PUBLISH_GUARD = HOOK_DIR / "publish-guard.py"
+SAFE_RM = REAL_HOME / ".local" / "bin" / "rm"
 
 
 class AgentHookTests(unittest.TestCase):
@@ -41,6 +41,7 @@ class AgentHookTests(unittest.TestCase):
     def test_codex_and_claude_hook_config_are_valid_json(self) -> None:
         codex = json.loads((REAL_HOME / ".codex" / "hooks.json").read_text(encoding="utf-8"))
         claude = json.loads((REAL_HOME / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        codex_rules = (REAL_HOME / ".codex" / "rules" / "default.rules").read_text(encoding="utf-8")
 
         self.assertEqual(
             codex["hooks"]["SessionStart"][0]["hooks"][0]["command"],
@@ -50,10 +51,12 @@ class AgentHookTests(unittest.TestCase):
             claude["hooks"]["SessionStart"][0]["hooks"][0]["command"],
             "$HOME/.config/agents/hooks/session-start-context.sh",
         )
-        self.assertEqual(
-            claude["hooks"]["PreToolUse"][1]["hooks"][0]["command"],
-            "$HOME/.config/agents/hooks/publish-guard.py",
-        )
+        self.assertEqual(len(claude["hooks"]["PreToolUse"]), 1)
+        self.assertNotIn("ask", claude["permissions"])
+        self.assertNotIn("publish-guard.py", json.dumps(claude))
+        self.assertNotIn("Bash(rm -rf", json.dumps(claude["permissions"]["allow"]))
+        self.assertIn("Bash(/bin/rm *)", claude["permissions"]["deny"])
+        self.assertIn('prefix_rule(pattern=["/bin/rm"], decision="forbidden")', codex_rules)
         self.assertEqual(
             codex["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
             "$HOME/.config/agents/hooks/recall-on-error.sh",
@@ -63,6 +66,31 @@ class AgentHookTests(unittest.TestCase):
             "$HOME/.config/agents/hooks/recall-on-error.sh",
         )
 
+    def test_safe_rm_accepts_force_recursive_for_a_missing_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing"
+            proc = subprocess.run(
+                [str(SAFE_RM), "-rf", str(missing)],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_safe_rm_refuses_the_current_working_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = subprocess.run(
+                [str(SAFE_RM), "-rf", "."],
+                cwd=tmp,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("refusing protected path", proc.stderr)
+            self.assertTrue(Path(tmp).exists())
+
     def test_session_context_emits_valid_json_for_agents_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_root = Path(tmp)
@@ -70,6 +98,7 @@ class AgentHookTests(unittest.TestCase):
             config_home.mkdir(parents=True)
             env = os.environ.copy()
             env["AGENTS_CONFIG_HOME"] = str(config_home)
+            env["CLAUDE_PROJECT_DIR"] = str(config_home)
             env["PATH"] = f"{REAL_HOME / 'bin'}:{env.get('PATH', '')}"
 
             proc = self.run_hook(SESSION_HOOK, cwd=config_home, env=env)
@@ -78,6 +107,20 @@ class AgentHookTests(unittest.TestCase):
             context = payload["hookSpecificOutput"]["additionalContext"]
             self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
             self.assertIn("repo: agents-config", context)
+
+    def test_session_context_is_silent_for_codex_startup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            config_home = tmp_root / "home" / ".config" / "agents"
+            config_home.mkdir(parents=True)
+            env = os.environ.copy()
+            env["AGENTS_CONFIG_HOME"] = str(config_home)
+            env.pop("CLAUDE_PROJECT_DIR", None)
+            env["PATH"] = f"{REAL_HOME / 'bin'}:{env.get('PATH', '')}"
+
+            proc = self.run_hook(SESSION_HOOK, cwd=config_home, env=env)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(proc.stdout, "")
 
     def test_session_context_is_silent_outside_repo_or_config_namespace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -198,36 +241,6 @@ class AgentHookTests(unittest.TestCase):
             )
             self.assertEqual(active_proc.returncode, 0, active_proc.stderr)
             self.assertEqual(active_proc.stdout, "")
-
-    def assert_publish_guard_asks(self, command: str, reason_part: str) -> None:
-        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
-        proc = self.run_hook(PUBLISH_GUARD, cwd=REAL_HOME, env=os.environ.copy(), stdin=payload)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        output = json.loads(proc.stdout)
-        hook_output = output["hookSpecificOutput"]
-        self.assertEqual(hook_output["hookEventName"], "PreToolUse")
-        self.assertEqual(hook_output["permissionDecision"], "ask")
-        self.assertIn(reason_part, hook_output["permissionDecisionReason"])
-
-    def test_publish_guard_forces_ask_for_publish_and_pr_mutation_commands(self) -> None:
-        self.assert_publish_guard_asks("git push origin HEAD", "git push")
-        self.assert_publish_guard_asks("git -C /tmp/repo push origin HEAD", "git push")
-        self.assert_publish_guard_asks("gh pr create --draft", "gh pr create")
-        self.assert_publish_guard_asks("gh pr merge 123 --squash", "gh pr merge")
-        self.assert_publish_guard_asks("gh api -X PATCH repos/acme/repo/pulls/1 -f title=x", "gh api PATCH")
-        self.assert_publish_guard_asks("gh api --method DELETE repos/acme/repo/issues/1", "gh api DELETE")
-        self.assert_publish_guard_asks("body=$(cat /tmp/body.md); gh api repos/acme/repo/pulls/1 -f title=x", "gh api write")
-
-    def test_publish_guard_is_silent_for_read_only_or_non_bash_payloads(self) -> None:
-        for payload in [
-            {"tool_name": "Bash", "tool_input": {"command": "gh pr view 123 --json title"}},
-            {"tool_name": "Bash", "tool_input": {"command": "git status --short"}},
-            {"tool_name": "Read", "tool_input": {"file_path": "/tmp/x"}},
-        ]:
-            proc = self.run_hook(PUBLISH_GUARD, cwd=REAL_HOME, env=os.environ.copy(), stdin=json.dumps(payload))
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            self.assertEqual(proc.stdout, "")
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -133,6 +133,7 @@ maybe_install_brew_tools() {
 }
 
 top_level_files=(
+  ".profile"
   ".zshrc"
   ".zprofile"
   ".zshenv"
@@ -147,9 +148,11 @@ done
 
 link_tree_files ".config"
 link_tree_files ".claude"
+link_tree_files ".local"
 link_tree_files "bin"
 
-run chmod 700 "${HOME}/.config" "${HOME}/.claude" "${HOME}/bin"
+run chmod 700 "${HOME}/.config" "${HOME}/.claude" "${HOME}/.local" "${HOME}/bin"
+run chmod 755 "${HOME}"/.local/bin/*
 run chmod 755 "${HOME}"/bin/agent-* "${HOME}"/.claude/hooks/*.sh
 run chmod 755 "${HOME}"/.config/agents/bin/agent-review "${HOME}"/.config/agents/hooks/*
 run ln -sfn "${HOME}/.config/agents/bin/agent-review" "${HOME}/bin/agent-review"

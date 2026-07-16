@@ -1,0 +1,88 @@
+#!/bin/bash
+set -euo pipefail
+
+readonly trash_bin="/usr/bin/trash"
+
+die() {
+  echo "safe rm: $*" >&2
+  exit 2
+}
+
+[[ -x "$trash_bin" ]] || die "${trash_bin} is unavailable; macOS 15 or newer is required"
+[[ $# -gt 0 ]] || die "missing operand"
+
+declare -a paths=()
+declare -a trash_args=("$trash_bin" -s)
+force=false
+options_done=false
+verbose=false
+
+for arg in "$@"; do
+  if [[ "$options_done" == false ]]; then
+    case "$arg" in
+      --)
+        options_done=true
+        continue
+        ;;
+      --force)
+        force=true
+        continue
+        ;;
+      --recursive | --dir | --preserve-root | --one-file-system)
+        continue
+        ;;
+      --interactive | --interactive=* | --no-preserve-root)
+        die "unsupported safety-sensitive option: $arg"
+        ;;
+      --*)
+        die "unsupported option: $arg"
+        ;;
+      -)
+        ;;
+      -*)
+        flags="${arg#-}"
+        [[ "$flags" != *i* && "$flags" != *I* ]] || die "interactive flags are unsupported; use trash directly"
+        unsupported="${flags//[fRrdv]/}"
+        [[ -z "$unsupported" ]] || die "unsupported option: -${unsupported}"
+        [[ "$flags" == *f* ]] && force=true
+        [[ "$flags" == *v* ]] && verbose=true
+        continue
+        ;;
+    esac
+  fi
+  paths+=("$arg")
+done
+
+if [[ ${#paths[@]} -eq 0 ]]; then
+  [[ "$force" == true ]] && exit 0
+  die "missing operand"
+fi
+
+cwd="$(pwd -P)"
+home="$(/bin/realpath "$HOME")"
+declare -a trash_paths=()
+
+for path in "${paths[@]}"; do
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    [[ "$force" == true ]] && continue
+    die "cannot remove '$path': no such file or directory"
+  fi
+
+  if [[ ! -L "$path" ]]; then
+    resolved="$(/bin/realpath "$path")"
+    case "$resolved" in
+      / | "$home" | "$cwd")
+        die "refusing protected path: $path"
+        ;;
+    esac
+  fi
+
+  case "$path" in
+    -*) trash_paths+=("./$path") ;;
+    *) trash_paths+=("$path") ;;
+  esac
+done
+
+[[ ${#trash_paths[@]} -gt 0 ]] || exit 0
+[[ "$verbose" == true ]] && trash_args+=(-v)
+exec "${trash_args[@]}" "${trash_paths[@]}"
