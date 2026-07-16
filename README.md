@@ -116,6 +116,19 @@ checks on push and pull request.
   public-safe Codex rules that prompt before publishing while leaving
   machine-specific allow rules out of the repo.
 
+### Agent plugin compatibility
+
+Keep `warp@claude-code-warp` disabled in Codex. Its hook manifest launches
+`Stop`, `UserPromptSubmit`, and related scripts through
+`${CLAUDE_PLUGIN_ROOT}`, which is a Claude Code plugin variable and does not
+resolve in Codex's hook runner. Enabling it in Codex makes those hooks fail with
+exit code 127. The plugin may remain enabled in Claude Code.
+
+The complete `~/.codex/config.toml` stays machine-local because it contains
+runtime and per-machine state. Verify the live plugin state with
+`codex plugin list`; the Warp entry should report `installed, disabled` until
+the plugin publishes a Codex-compatible hook manifest.
+
 ## Local Private Config
 
 Do not commit local credentials or work-only exports. Put them in:
