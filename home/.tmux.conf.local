@@ -29,7 +29,7 @@ tmux_conf_new_session_prompt=false
 #   - true
 #   - false (default)
 #   - disabled (do not modify new-session bindings)
-tmux_conf_new_session_retain_current_path=false
+tmux_conf_new_session_retain_current_path=true
 
 
 # -- windows & pane creation ---------------------------------------------------
@@ -38,7 +38,7 @@ tmux_conf_new_session_retain_current_path=false
 #   - true
 #   - false (default)
 #   - disabled (do not modify new-window bindings)
-tmux_conf_new_window_retain_current_path=false
+tmux_conf_new_window_retain_current_path=true
 
 # new window tries to reconnect ssh sessions, possible values are:
 #   - true
@@ -181,7 +181,7 @@ tmux_conf_theme_status_attr="none"
 #     - #{hostname_full_ssh}
 #     - #{username}
 #     - #{username_ssh}
-tmux_conf_theme_terminal_title="#h ❐ #S ● #I #W"
+tmux_conf_theme_terminal_title="#S | #I:#W"
 
 # window status style
 #   - built-in variables are:
@@ -383,11 +383,17 @@ tmux_conf_urlscan_options="--compact --dedupe"
 
 # this is the place to override or undo settings
 
-# increase history size
-#set -g history-limit 10000
+# increase history size for long agent sessions and redraw-heavy TUIs
+set -g history-limit 100000
 
-# start with mouse mode enabled
-#set -g mouse on
+# keep mouse mode disabled so terminal text selection and copy remain native
+set -g mouse off
+
+# status messages linger long enough to read without staying in the way
+set -g display-time 2000
+
+# keep WezTerm tab titles compact: session | window-index:window-name
+set -g set-titles-string "#S | #I:#W"
 
 # force Vi mode
 #   really you should export VISUAL or EDITOR environment variable, see manual
@@ -471,8 +477,9 @@ set -g @extrakto_key 'Tab'
 set -g @extrakto_split_direction 'p'  # popup
 set -g @extrakto_popup_size '90%'
 
-# -- tmux-floax: floating scratch pane ----------------------------------------
+# -- tmux-floax: floating scratch pane for AI quick-ask -----------------------
 # <prefix> + P toggles a floating pane on top of the current pane.
+# Useful for invoking `ask-claude` / `ask-codex` without disturbing layout.
 set -g @plugin 'omerxx/tmux-floax'
 set -g @floax-bind 'P'
 set -g @floax-width '85%'
@@ -504,6 +511,10 @@ bind-key "o" run-shell "sesh connect \"$(\
 # equivalent and was crash-prone (see ~/.config/agents/LEARNINGS.md).
 bind-key w choose-tree -Zw
 bind-key W choose-tree -Zw
+
+# <prefix> + A opens the cross-agent dashboard. If abtop is installed, the
+# dashboard adds a dedicated live agent-monitor window.
+bind-key A run-shell "agent-dashboard"
 
 # -- ambient "which agent needs me" signals -----------------------------------
 # Event-driven only: a window lights up when an agent actually does something —

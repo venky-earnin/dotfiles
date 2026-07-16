@@ -11,10 +11,9 @@
 # Allowed types: feat, fix, test, refactor, docs, chore, ci, perf, exp
 # Slug shape:    ^[a-z0-9][a-z0-9.-]*$  (kebab-case, ~50 chars max)
 #
-# Designed to be called by agent-task in ~/.zshrc when the user passes a
-# sentence instead of a slug (e.g. cl "add more decoder metrics and cleanup
-# spammy mlflow logs"). See AGENTS.md "Git hygiene" for the branch-name
-# conventions this helper enforces.
+# Useful when creating a worktree from a sentence instead of an explicit
+# type/slug. See AGENTS.md "Git hygiene" for the branch-name conventions this
+# helper enforces.
 
 set -euo pipefail
 
