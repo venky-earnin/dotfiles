@@ -35,6 +35,8 @@ require_file() {
 }
 
 require_link ".zshrc"
+require_link ".zprofile"
+require_link ".zshenv"
 require_link ".profile"
 require_link ".gitconfig"
 require_link ".tmux.conf"
@@ -56,6 +58,22 @@ require_file ".config/zsh/private.zsh"
 
 echo "==> linked shell syntax"
 HOME="$tmp_home" zsh -n "$tmp_home/.zshrc"
+
+echo "==> agent-shell Homebrew PATH"
+HOME="$tmp_home" PATH="/usr/bin:/bin" zsh -c '
+  [[ ":$PATH:" == *:/opt/homebrew/bin:* ]]
+  [[ ":$PATH:" == *:/opt/homebrew/sbin:* ]]
+'
+HOME="$tmp_home" PATH="/usr/bin:/bin" bash -lc '
+  case ":$PATH:" in
+    *:/opt/homebrew/bin:*) ;;
+    *) exit 1 ;;
+  esac
+  case ":$PATH:" in
+    *:/opt/homebrew/sbin:*) ;;
+    *) exit 1 ;;
+  esac
+'
 
 echo "==> recoverable rm precedence"
 HOME="$tmp_home" zsh -lc '[[ "$(command -v rm)" == "$HOME/.local/bin/rm" ]]'
