@@ -1,5 +1,15 @@
 # Login-shell PATH setup for Bash and POSIX shells.
 
+case ":$PATH:" in
+  *:/opt/homebrew/sbin:*) ;;
+  *) PATH="/opt/homebrew/sbin:$PATH" ;;
+esac
+case ":$PATH:" in
+  *:/opt/homebrew/bin:*) ;;
+  *) PATH="/opt/homebrew/bin:$PATH" ;;
+esac
+export PATH
+
 if [ -r "$HOME/.local/bin/env" ]; then
   . "$HOME/.local/bin/env"
 fi
